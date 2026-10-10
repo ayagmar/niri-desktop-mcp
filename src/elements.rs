@@ -5,10 +5,15 @@
 
 pub(crate) mod actions;
 
+use std::hash::{BuildHasher as _, RandomState};
+use std::sync::OnceLock;
+
 use niri_ipc::Window;
 use serde::Serialize;
 
-use crate::a11y::model::{self, Extents, Filter, Fresh, LayoutBox, Placement, Refused, Unmappable};
+use crate::a11y::model::{
+    self, Extents, Filter, Fresh, LayoutBox, Lineage, Placement, Refused, Unmappable,
+};
 use crate::a11y::{self, A11y, Capped, ElementRef, Failed, Node, Want};
 use crate::coords::LayoutPt;
 use crate::error::{CallError, ErrorName, ToolError};
@@ -108,9 +113,13 @@ pub(crate) async fn list(
         matches: |node: &Node| listed(&ask.filter, node),
     };
     let walked = request.walk(&app.bus, &frame.node, want).await?;
-    let mut matching = walked.nodes.iter().filter(|node| listed(&ask.filter, node));
+    let mut matching = walked
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(_, node)| listed(&ask.filter, node));
     let mut elements = Vec::new();
-    for node in matching.by_ref().take(ask.limit) {
+    for (at, node) in matching.by_ref().take(ask.limit) {
         let placement = Placement {
             states: node.states,
             extents: node.extents.unwrap_or(Extents {
@@ -132,6 +141,10 @@ pub(crate) async fn list(
                 window: window.id,
                 pid,
                 actions: node.actions.clone(),
+                lineage: Lineage {
+                    chain: walked.lineage(at),
+                    name: name_hash(&node.name),
+                },
             },
         });
         elements.push(Listed {
@@ -181,6 +194,7 @@ pub(crate) async fn aim(
         return Err(refused);
     }
     let request = a11y.request(a11y::BUDGET).await?;
+    identify(&request, element, window).await?;
     let probe = match request.probe(element).await {
         Ok(probe) => probe,
         Err(Failed::Gone(detail)) => return Err(stale(&detail)),
@@ -199,6 +213,72 @@ pub(crate) async fn aim(
         Ok(found) => Ok(found.centre()),
         Err(Refused::Stale(detail)) => Err(stale(&detail)),
         Err(Refused::Unmappable(why)) => Err(unmappable(why)),
+    }
+}
+
+/// A hash of an element's name, keyed for this process, so a ref can tell whether the name
+/// changed without keeping it.
+fn name_hash(name: &str) -> u64 {
+    static KEYS: OnceLock<RandomState> = OnceLock::new();
+    KEYS.get_or_init(RandomState::new).hash_one(name)
+}
+
+/// Checks that `element` is still the object `elements` listed, not another that took its
+/// path: its application still has niri's `window`, whose accessible frame, found again,
+/// is the ref's; each object from that frame down to the element is still at the index
+/// it had among its parent's children, as the parent says; and its name is the one it
+/// had. Otherwise `element_stale`. Its role is checked by the caller.
+pub(crate) async fn identify(
+    request: &a11y::Request,
+    element: &ElementRef,
+    window: &Window,
+) -> Result<(), ToolError> {
+    let app = request.app(element.kept.pid).await.map_err(|error| {
+        if error.name == ErrorName::NotAccessible {
+            stale("the application left the accessibility bus")
+        } else {
+            error
+        }
+    })?;
+    if app.bus != element.bus {
+        return Err(stale(
+            "the application connected to the accessibility bus again",
+        ));
+    }
+    let frame = request
+        .frame(&app, window.layout.window_size, window.title.as_deref())
+        .await?;
+    if frame.node.path != element.frame {
+        return Err(stale(&format!(
+            "window {} is another accessible window now",
+            window.id
+        )));
+    }
+    let mut parent = element.frame.as_str();
+    for (path, index) in &element.kept.lineage.chain {
+        let (bus, child) = request
+            .child_at(&element.bus, parent, *index)
+            .await
+            .map_err(gone_is_stale)?;
+        if bus != element.bus || child != *path {
+            return Err(stale(
+                "the element moved in its window, or another element took its place",
+            ));
+        }
+        parent = path;
+    }
+    let name = request.element_name(element).await.map_err(gone_is_stale)?;
+    if name_hash(&name) != element.kept.lineage.name {
+        return Err(stale("the element's name changed"));
+    }
+    Ok(())
+}
+
+/// A call on a gone object is `element_stale`; other failures stay as they are.
+pub(crate) fn gone_is_stale(failed: Failed) -> ToolError {
+    match failed {
+        Failed::Gone(detail) => stale(&detail),
+        Failed::Refused(error) | Failed::Error(error) => error,
     }
 }
 

@@ -22,8 +22,15 @@ pub(crate) struct Node {
     /// None without a Component interface.
     pub(crate) extents: Option<Extents>,
     pub(crate) actions: Vec<String>,
-    /// The object paths of its children in the same application.
-    pub(crate) children: Vec<String>,
+    /// Its children in the same application.
+    pub(crate) children: Vec<Child>,
+}
+
+/// A child of a node: its object path, and its index among all of the node's children.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Child {
+    pub(crate) index: i32,
+    pub(crate) path: String,
 }
 
 /// Where the walk reads nodes from.
@@ -50,8 +57,30 @@ pub(crate) enum Capped {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct Walked {
     pub(crate) nodes: Vec<Node>,
+    /// Where each node of `nodes` sits: its parent among them, none under the root, and
+    /// its index among the parent's children.
+    places: Vec<(Option<usize>, i32)>,
     /// Set when the walk stopped early with nodes left that might have matched.
     pub(crate) capped: Option<Capped>,
+}
+
+impl Walked {
+    /// The path and index in its parent of each node from the root's child down to the
+    /// node at `at`.
+    pub(crate) fn lineage(&self, at: usize) -> Vec<(String, i32)> {
+        let mut chain = Vec::new();
+        let mut next = Some(at);
+        while let Some(this) = next {
+            let (Some(node), Some((parent, index))) = (self.nodes.get(this), self.places.get(this))
+            else {
+                break;
+            };
+            chain.push((node.path.clone(), *index));
+            next = *parent;
+        }
+        chain.reverse();
+        chain
+    }
 }
 
 /// What the walk is looking for: nodes for which `matches` holds, and how many of them
@@ -76,13 +105,18 @@ pub(crate) async fn walk<F: Fn(&Node) -> bool + Sync>(
 ) -> Result<Walked, ToolError> {
     let mut walked = Walked::default();
     let mut found = 0;
-    let mut pending: Vec<String> = root.children.iter().rev().cloned().collect();
-    while let Some(path) = pending.pop() {
+    let mut pending: Vec<(Option<usize>, Child)> = root
+        .children
+        .iter()
+        .rev()
+        .map(|child| (None, child.clone()))
+        .collect();
+    while let Some((parent, child)) = pending.pop() {
         if walked.nodes.len() == cap {
             walked.capped = Some(Capped::NodeCap);
             break;
         }
-        let node = match source.node(&path).await {
+        let node = match source.node(&child.path).await {
             Ok(Some(node)) => node,
             Ok(None) => continue,
             Err(error) if error.name == ErrorName::DeadlineExceeded && source.spent() => {
@@ -91,11 +125,18 @@ pub(crate) async fn walk<F: Fn(&Node) -> bool + Sync>(
             }
             Err(error) => return Err(error),
         };
+        let at = walked.nodes.len();
         if node.states.has(super::model::State::Showing) {
-            pending.extend(node.children.iter().rev().cloned());
+            pending.extend(
+                node.children
+                    .iter()
+                    .rev()
+                    .map(|grandchild| (Some(at), grandchild.clone())),
+            );
         }
         found += usize::from((want.matches)(&node));
         walked.nodes.push(node);
+        walked.places.push((parent, child.index));
         if found > want.wanted {
             break;
         }
@@ -151,13 +192,24 @@ mod tests {
                 states: States::from_words(&[if *showing { SHOWING } else { 0 }]),
                 extents: None,
                 actions: Vec::new(),
-                children: children.iter().map(|&child| child.to_owned()).collect(),
+                children: kids(children),
             })))
         }
 
         fn spent(&self) -> bool {
             self.spent.load(Ordering::Relaxed)
         }
+    }
+
+    /// Children at their index in the list.
+    fn kids(paths: &[&str]) -> Vec<Child> {
+        (0..)
+            .zip(paths)
+            .map(|(index, &path)| Child {
+                index,
+                path: path.to_owned(),
+            })
+            .collect()
     }
 
     fn root(children: &[&str]) -> Node {
@@ -168,7 +220,7 @@ mod tests {
             states: States::from_words(&[SHOWING]),
             extents: None,
             actions: Vec::new(),
-            children: children.iter().map(|&child| child.to_owned()).collect(),
+            children: kids(children),
         }
     }
 
@@ -207,6 +259,28 @@ mod tests {
         let walked = walk(&tree, &tree_root, 2000, everything()).await.unwrap();
         assert_eq!(paths(&walked), ["/a", "/a/1", "/a/2", "/hidden", "/b"]);
         assert_eq!(walked.capped, None);
+    }
+
+    #[tokio::test]
+    async fn a_nodes_lineage_is_each_ancestors_place_from_the_roots_child_down() {
+        let tree = Tree::new([
+            ("/a", (true, vec!["/a/1", "/a/2"])),
+            ("/a/1", (true, vec![])),
+            ("/a/2", (true, vec!["/a/2/x"])),
+            ("/a/2/x", (true, vec![])),
+            ("/b", (true, vec![])),
+        ]);
+        let walked = walk(&tree, &root(&["/gone", "/a", "/b"]), 2000, everything())
+            .await
+            .unwrap();
+        let at = |path: &str| walked.nodes.iter().position(|node| node.path == path);
+        let place = |path: &str, index| (path.to_owned(), index);
+        assert_eq!(
+            walked.lineage(at("/a/2/x").unwrap()),
+            [place("/a", 1), place("/a/2", 1), place("/a/2/x", 0)]
+        );
+        // A gone sibling keeps its place in the parent's list.
+        assert_eq!(walked.lineage(at("/b").unwrap()), [place("/b", 2)]);
     }
 
     #[tokio::test]

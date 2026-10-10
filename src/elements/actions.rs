@@ -21,8 +21,9 @@ use crate::input::keyboard::{self, Expect, Focus};
 use crate::niri;
 use crate::niri::waiter::{View, Waited};
 use crate::policy::{self, Loaded};
+use niri_ipc::Window;
 
-use super::stale;
+use super::{gone_is_stale, identify, stale};
 
 /// How long an activation's effect has to show before the element is looked at again.
 /// GTK 3 and GTK 4 buttons answer the action as they answer Enter: shown pressed for
@@ -181,6 +182,7 @@ pub(crate) async fn activate(
     let mut waiter = niri::waiter(input.niri.events).await?;
     let focus = owner_focused(input.policy, waiter.view(), element, &expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
+    identify(&request, element, owner(waiter.view(), element)?).await?;
     let (role, before) = current(&request, element).await?;
     let actions = request.actions(element).await.map_err(gone_is_stale)?;
     let index = actions
@@ -234,6 +236,7 @@ pub(crate) async fn set_text(
     let waiter = niri::waiter(input.niri.events).await?;
     let focus = owner_focused(input.policy, waiter.view(), element, &expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
+    identify(&request, element, owner(waiter.view(), element)?).await?;
     let (role, states) = current(&request, element).await?;
     if let Some(refused) = policy::refuse_secret_field(model::role_name(role)) {
         return Err(refused.into());
@@ -305,12 +308,7 @@ fn owner_focused(
             "element actions always check focus: give `expect` as {\"window_id\"} or {\"app_id\"}, not \"none\"".to_owned(),
         ));
     }
-    let kept = &element.kept;
-    let window = view
-        .windows()
-        .get(&kept.window)
-        .filter(|window| window.pid == Some(kept.pid))
-        .ok_or_else(|| stale(&format!("window {} is gone", kept.window)))?;
+    let window = owner(view, element)?;
     if let Some(refused) = policy::refuse_window(policy, window.id, window.app_id.as_deref()) {
         return Err(refused.into());
     }
@@ -329,6 +327,15 @@ fn owner_focused(
         .into());
     }
     Ok(keyboard::check_expect(expect, view)?)
+}
+
+/// The element's window in niri's `view`, if it is still the one the ref was listed in.
+fn owner<'a>(view: &'a View, element: &ElementRef) -> Result<&'a Window, ToolError> {
+    let kept = &element.kept;
+    view.windows()
+        .get(&kept.window)
+        .filter(|window| window.pid == Some(kept.pid))
+        .ok_or_else(|| stale(&format!("window {} is gone", kept.window)))
 }
 
 /// The element's role and states now, if it is still the element listed and showing.
@@ -429,14 +436,6 @@ fn taken(dispatched: Dispatched<bool>, what: &str) -> Result<Option<String>, Too
     }
 }
 
-/// A call on a gone element is `element_stale`; other failures stay as they are.
-fn gone_is_stale(failed: Failed) -> ToolError {
-    match failed {
-        Failed::Gone(detail) => stale(&detail),
-        Failed::Refused(error) | Failed::Error(error) => error,
-    }
-}
-
 fn refused_by_app(what: &str) -> ToolError {
     ToolError::new(
         ErrorName::UpstreamError,
@@ -465,6 +464,7 @@ mod tests {
                 window,
                 pid: 1,
                 actions: names(actions),
+                lineage: model::Lineage::default(),
             },
         }
     }

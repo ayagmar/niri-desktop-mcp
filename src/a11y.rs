@@ -23,7 +23,7 @@ use zbus::zvariant::{DynamicType, OwnedObjectPath, OwnedValue};
 
 use crate::error::{ErrorName, ToolError};
 use model::{Extents, Frame, Kept, NoFrame, Picked, States};
-pub(crate) use walk::{Capped, Node, Want};
+pub(crate) use walk::{Capped, Child, Node, Want};
 
 /// Each call's deadline.
 const CALL: Duration = Duration::from_secs(1);
@@ -387,8 +387,8 @@ impl Request {
             .await?
             .ok_or_else(|| not_accessible(format!("application {} left the bus", app.bus)))?;
         let mut frames = Vec::new();
-        for path in &root.children {
-            if let Some(node) = self.node(&app.bus, path).await? {
+        for child in &root.children {
+            if let Some(node) = self.node(&app.bus, &child.path).await? {
                 frames.push(node);
             }
         }
@@ -436,19 +436,9 @@ impl Request {
     /// a Component or Action interface has no extents or no actions.
     pub(crate) async fn node(&self, bus: &str, path: &str) -> Result<Option<Node>, ToolError> {
         let at = (bus, path);
-        let name = async {
-            let value: OwnedValue = self
-                .call(
-                    at,
-                    ("org.freedesktop.DBus.Properties", "Get"),
-                    &(ACCESSIBLE, "Name"),
-                )
-                .await?;
-            Ok::<_, Failed>(String::try_from(value).unwrap_or_default())
-        };
         let (role, name, states, children, extents, actions) = tokio::join!(
             self.call::<_, u32>(at, (ACCESSIBLE, "GetRole"), &()),
-            name,
+            self.name(at),
             self.call::<_, Vec<u32>>(at, (ACCESSIBLE, "GetState"), &()),
             self.call::<_, Vec<(String, OwnedObjectPath)>>(at, (ACCESSIBLE, "GetChildren"), &()),
             self.extents(bus, path),
@@ -473,10 +463,13 @@ impl Request {
                 .into_iter()
                 .map(|(action, _, _)| action)
                 .collect(),
-            children: children
-                .into_iter()
-                .filter(|(child_bus, _)| child_bus == bus)
-                .map(|(_, child)| child.to_string())
+            children: (0..)
+                .zip(children)
+                .filter(|(_, (child_bus, _))| child_bus == bus)
+                .map(|(index, (_, child))| Child {
+                    index,
+                    path: child.to_string(),
+                })
                 .collect(),
         }))
     }
@@ -490,6 +483,37 @@ impl Request {
         want: Want<F>,
     ) -> Result<walk::Walked, ToolError> {
         walk::walk(&AppTree { request: self, bus }, root, NODE_CAP, want).await
+    }
+
+    /// The accessible name of the object at `at`.
+    async fn name(&self, at: (&str, &str)) -> Result<String, Failed> {
+        let value: OwnedValue = self
+            .call(
+                at,
+                ("org.freedesktop.DBus.Properties", "Get"),
+                &(ACCESSIBLE, "Name"),
+            )
+            .await?;
+        Ok(String::try_from(value).unwrap_or_default())
+    }
+
+    /// The kept element's accessible name now.
+    pub(crate) async fn element_name(&self, element: &ElementRef) -> Result<String, Failed> {
+        self.name(element.at()).await
+    }
+
+    /// The child at `index` among all the children of the object at `parent` in
+    /// application `bus`: its bus name and path.
+    pub(crate) async fn child_at(
+        &self,
+        bus: &str,
+        parent: &str,
+        index: i32,
+    ) -> Result<(String, String), Failed> {
+        let (child_bus, child): (String, OwnedObjectPath) = self
+            .call((bus, parent), (ACCESSIBLE, "GetChildAtIndex"), &(index,))
+            .await?;
+        Ok((child_bus, child.to_string()))
     }
 
     /// The object's extents in its window, from its Component interface.

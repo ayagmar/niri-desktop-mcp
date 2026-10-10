@@ -131,7 +131,7 @@ An agent should stop and tell you when it gets one of these. Calling the action 
 
 ### `element_stale`
 
-**Cause:** an element ref's window, app or element is gone, the element is now something else, or the ref isn't from this lease.
+**Cause:** an element ref's window, app or element is gone, the element is now something else, has another name, or sits elsewhere in its window's tree (an app may reuse an object for another record, as a long list does with its rows), or the ref isn't from this lease.
 
 **What to do:** call `elements` again and aim from its new list.
 

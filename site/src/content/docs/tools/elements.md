@@ -61,7 +61,7 @@ While the agent holds the lease, pass an element's `element_ref` as `element` to
 {"screenshot_ref": "shot-5e1a90c2-4", "element": "elem-5e1a90c2-2"}
 ```
 
-Just before sending, the server asks the app for the element again and checks that it is the same kind of element, still showing, and inside the screenshot. Then it aims at the centre of its box as it is now, so a window that moved since `elements` is still hit. It fails with `element_stale` when the element, its window or its app is gone, and with `element_unmappable` when the element can't be aimed at now; the detail starts with `frame_size_mismatch`, `not_showing`, `empty` or `outside_screenshot`. The server keeps the last 1000 element refs of a lease and drops them all when the lease ends.
+Just before sending, the server asks the app for the element again and checks that it is the same element, at the same place in its window's tree with the same name, the same kind of element, still showing, and inside the screenshot. Then it aims at the centre of its box as it is now, so a window that moved since `elements` is still hit. It fails with `element_stale` when the element, its window or its app is gone, and with `element_unmappable` when the element can't be aimed at now; the detail starts with `frame_size_mismatch`, `not_showing`, `empty` or `outside_screenshot`. The server keeps the last 1000 element refs of a lease and drops them all when the lease ends.
 
 The server checks the element, not what is drawn over it: a panel or popup covering the element still gets the click.
 
@@ -71,7 +71,7 @@ The server checks the element, not what is drawn over it: a panel or popup cover
 
 - the element's window must have keyboard focus, and `expect`, `{"window_id": …}` or `{"app_id": "…"}`, must name it, or the call fails with `focus_mismatch` and nothing is sent. `"none"` is refused. A Noctalia panel holds keyboard focus with no window focused, so an element under an open panel is refused too;
 - the deny list applies to the element's window (`app_denied`);
-- the element is checked again just before: its window still exists for the same process, the element answers with the same role, and it is showing (`element_stale` or `element_unmappable` with `not_showing` otherwise).
+- the element is checked again just before: its window still exists for the same process, the element is still the one listed, at the same place in the same window's tree with the same name, it answers with the same role, and it is showing (`element_stale` or `element_unmappable` with `not_showing` otherwise).
 
 They don't need a screenshot, and they work on elements with no `layout_box`, such as in GTK 3 and Qt windows with client-side decorations. The result's `element` has the element's `role` and never its name or text; the audit log keeps the role, the action and the text's length.
 

@@ -67,20 +67,31 @@ fn workspace() -> Value {
 
 impl Desk {
     async fn start(name: &str) -> Self {
-        let mut fixture = Fixture::new(name);
-        fixture.program("noctalia", "exit 0");
-        fixture.grim(&jpeg(1280, 720, b"evidence"));
-        let (bus, mock) = atspi::start(&mut fixture, &["/frame"], objects()).await;
-        let noctalia = noctalia::start(&fixture, UNLOCKED);
-        let mut niri = Niri::start(&fixture);
         let windows = [
             app_window(WINDOW, true),
             window_on(2, Some("other"), 1, false),
         ];
-        niri.set_windows(&windows, &[workspace()]);
+        Self::start_with(name, &["/frame"], objects(), &windows).await
+    }
+
+    /// A desk whose mock application has `frames` under its root, holding `objects`, and
+    /// whose niri has `windows`.
+    async fn start_with(
+        name: &str,
+        frames: &[&str],
+        objects: Vec<(&'static str, Object)>,
+        windows: &[Value],
+    ) -> Self {
+        let mut fixture = Fixture::new(name);
+        fixture.program("noctalia", "exit 0");
+        fixture.grim(&jpeg(1280, 720, b"evidence"));
+        let (bus, mock) = atspi::start(&mut fixture, frames, objects).await;
+        let noctalia = noctalia::start(&fixture, UNLOCKED);
+        let mut niri = Niri::start(&fixture);
+        niri.set_windows(windows, &[workspace()]);
         let mut server = Server::start(&fixture).await;
         let stream = niri.stream().await;
-        stream.initial(&windows);
+        stream.initial(windows);
         server.structured("acquire_desktop").await;
         Self {
             server,
@@ -307,4 +318,72 @@ async fn a_bus_lost_after_the_call_went_out_is_uncertain() {
         assert_uncertain(&desk, tool, &result);
         assert_eq!(desk.mock.calls(member), 1);
     }
+}
+
+/// Activates `element` in window `window`, expecting the error named `error`, with nothing
+/// sent.
+async fn refused(desk: &mut Desk, element: &str, window: u64, error: &str) {
+    let arguments = json!({"element": element, "expect": {"window_id": window}});
+    let result = desk.server.call("activate_element", arguments).await;
+    assert_eq!(tool_error(&result).0, error, "{result}");
+    assert_eq!(desk.mock.calls("DoAction"), 0);
+}
+
+#[tokio::test]
+async fn another_object_at_a_listed_elements_path_is_stale() {
+    let mut desk = Desk::start("el-same-path").await;
+    let button = desk.element("Safe").await;
+    // A virtualized list reuses the object for another record: same path, role and action.
+    desk.mock.change("/button", |object| {
+        object.name = "Delete another record".to_owned();
+    });
+    refused(&mut desk, &button, WINDOW, "element_stale").await;
+    // Back to its name, but no longer among its parent's children.
+    desk.mock.change("/button", |object| {
+        object.name = "Safe".to_owned();
+    });
+    desk.mock.change("/panel", |panel| {
+        panel.children.retain(|child| child != "/button");
+    });
+    refused(&mut desk, &button, WINDOW, "element_stale").await;
+    // Back in place, it is the element listed again.
+    desk.mock.change("/panel", |panel| {
+        panel.children.insert(0, "/button".to_owned());
+    });
+    let arguments = json!({"element": button, "expect": {"window_id": WINDOW}});
+    let result = desk.server.call("activate_element", arguments).await;
+    assert_eq!(result["structuredContent"]["accepted"], true, "{result}");
+}
+
+#[tokio::test]
+async fn an_element_moved_to_another_window_of_its_app_is_stale() {
+    let mut objects = objects();
+    objects.extend([
+        ("/frame2", Object::frame("Other", (640, 480), &["/panel2"])),
+        ("/panel2", Object::panel(&[])),
+    ]);
+    let mut other = app_window(3, false);
+    other["title"] = json!("Other");
+    other["layout"]["window_size"] = json!([640, 480]);
+    let windows = [app_window(WINDOW, true), other];
+    let mut desk = Desk::start_with("el-moved", &["/frame", "/frame2"], objects, &windows).await;
+    let button = desk.element("Safe").await;
+    // The window that listed it is still focused; the button now sits in the other one.
+    desk.mock.change("/panel", |panel| {
+        panel.children.retain(|child| child != "/button");
+    });
+    desk.mock.change("/panel2", |panel| {
+        panel.children.push("/button".to_owned());
+    });
+    refused(&mut desk, &button, WINDOW, "element_stale").await;
+    // The other window's elements are refused while it isn't focused.
+    let listing = desk
+        .server
+        .structured_with("elements", json!({"window_id": 3}))
+        .await;
+    let moved = listing["elements"][0]["element_ref"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    refused(&mut desk, &moved, 3, "focus_mismatch").await;
 }
