@@ -19,7 +19,7 @@ These are the user's decisions. Don't call the refused action again and don't tr
 | `lease_held` | Another agent holds the lease (`acquire_desktop` only). |
 | `read_only` | The niri version isn't supported, niri sent events this build can't read, or the policy file is invalid. |
 | `app_denied` | The user's policy denies input to the focused app, or `elements`, element actions or closing for the window named. |
-| `secret_field` | `set_element_text` was aimed at a password field. Its text is never set by the server; ask the user to type it themselves. |
+| `secret_field` | `activate_element` or `set_element_text` was aimed at a field the toolkit marks as a password field (role `password_text`). Nothing was sent; ask the user to type it themselves. |
 | `untested_output_config` | The pointer only runs on one monitor at transform `Normal` (or in a nested niri). |
 | `unrestricted_required` | `niri_action` was given a gated action (`Spawn`, `SpawnSh`, `Quit`, `LoadConfigFile`, niri's screenshot actions, monitor power, casts and a few more). It needs `unrestricted = true` in the user's policy file; tell the user. |
 | `refused` | The selected keyboard backend cannot safely send the requested input: for example a text with more symbols missing from native's layout than it has spare keys, a missing control character, invalid backend selection, or held modifiers without native. Tell the user; do not change the backend or bypass the tools. |

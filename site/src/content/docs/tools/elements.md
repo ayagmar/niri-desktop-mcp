@@ -71,7 +71,10 @@ The server checks the element, not what is drawn over it: a panel or popup cover
 
 - the element's window must have keyboard focus, and `expect`, `{"window_id": …}` or `{"app_id": "…"}`, must name it, or the call fails with `focus_mismatch` and nothing is sent. `"none"` is refused. A Noctalia panel holds keyboard focus with no window focused, so an element under an open panel is refused too;
 - the deny list applies to the element's window (`app_denied`);
-- the element is checked again just before: its window still exists for the same process, the element is still the one listed, at the same place in the same window's tree, it answers with the same role, and it is showing (`element_stale` or `element_unmappable` with `not_showing` otherwise).
+- the element is checked again: its window still exists for the same process, the element is still the one listed, at the same place in the same window's tree, it answers with the same role, and it is showing (`element_stale` or `element_unmappable` with `not_showing` otherwise);
+- a field marked as a password field, with the role `password_text`, is refused with `secret_field`, for both tools: activating one can submit its form.
+
+Reading the element takes a few calls to the app, so right before the one call that acts, the server checks again: the lock state and the other checks every action passes, the element's role and states, then niri's latest events for the window's focus, the deny list and `expect`, and last the stop flag, the input-dirty marker and the lease. Any change refuses the call and nothing is sent; `focus` in the result is what that last check saw. A change in the moment between that check and the app receiving the call isn't seen: niri and the app can't be asked both at once.
 
 They don't need a screenshot, and they work on elements with no `layout_box`, such as in GTK 3 and Qt windows with client-side decorations. The result's `element` has the element's `role` and never its name or text; the audit log keeps the role, the action and the text's length.
 

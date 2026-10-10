@@ -1131,7 +1131,9 @@ impl Server {
     /// have keyboard focus and `expect` must name it, or the call fails with
     /// `focus_mismatch` and nothing is sent; `focus_window` it first. Refused with
     /// `app_denied` for a denied app, `element_stale` once the element or its window is
-    /// gone or changed, and `element_unmappable` while it isn't showing. The app's answer
+    /// gone or changed, `element_unmappable` while it isn't showing, and `secret_field`
+    /// for a field marked as a password (role `password_text`). All of it is checked
+    /// again right before the call, with the lock screen and the stop flag. The app's answer
     /// only means it took the request, so the element is looked at again a moment later:
     /// `observed` is `present` (with `element.states_set` and `states_cleared`), `gone`
     /// (it or its window went away, as when a button closes its dialog) or `unknown`
@@ -1163,8 +1165,11 @@ impl Server {
         let work = async {
             let input = self.engine.input(&self.session)?;
             let element = self.engine.element(&self.session, &args.element)?;
-            let focus = args.expect.into();
-            actions::activate(input, &element, args.action.as_deref(), focus).await
+            let gate = actions::Gate {
+                expect: args.expect.into(),
+                recheck: &self.engine.recheck(&self.session),
+            };
+            actions::activate(input, &element, args.action.as_deref(), gate).await
         };
         let asked = Asked {
             tool: "activate_element",
@@ -1178,9 +1183,10 @@ impl Server {
     /// instead of key events: `element` is an `element_ref` from `elements` whose states
     /// include `editable`. Up to 64 KiB of UTF-8; empty clears the field. No key events
     /// reach the app, so use `type_text` where keys matter, such as for autocompletion or
-    /// to submit. Focus, `expect` and the refusals are as for `activate_element`; a
-    /// password field is refused with `secret_field`, text over the limit with
-    /// `text_too_long`, and an element without editable text is an argument mistake.
+    /// to submit. Focus, `expect` and the refusals are as for `activate_element`, with
+    /// `secret_field` for a field marked as a password; a field that only hides its text
+    /// may not be marked, so never set one that may hold a secret. Text over the limit is
+    /// `text_too_long`, and an element without editable text an argument mistake.
     /// `observed` is `matched` when the field then holds as many characters as were set,
     /// `differs` when it holds another number (`element.characters`), as an app that
     /// filters input does, or `unknown`; `uncertain`, with `accepted` null, when the reply
@@ -1206,7 +1212,11 @@ impl Server {
         let work = async {
             let input = self.engine.input(&self.session)?;
             let element = self.engine.element(&self.session, &args.element)?;
-            actions::set_text(input, &element, &args.text, args.expect.into()).await
+            let gate = actions::Gate {
+                expect: args.expect.into(),
+                recheck: &self.engine.recheck(&self.session),
+            };
+            actions::set_text(input, &element, &args.text, gate).await
         };
         let asked = Asked {
             tool: "set_element_text",

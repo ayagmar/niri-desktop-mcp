@@ -10,7 +10,7 @@ use crate::atspi::{self, Bus, Mock, Object, PASSWORD_TEXT, TEXT};
 use crate::client::{Server, mistake, tool_error};
 use crate::fixture::{Fixture, jpeg};
 use crate::niri::{Niri, Stream, window_on};
-use crate::noctalia::{self, UNLOCKED};
+use crate::noctalia::{self, LOCKED, UNLOCKED};
 
 /// An action name an app could put private text in.
 const ODD_ACTION: &str = "open ACTION-SENTINEL";
@@ -26,8 +26,8 @@ const WINDOW: u64 = 1;
 struct Desk {
     server: Server,
     _niri: Niri,
-    _stream: Stream,
-    _noctalia: noctalia::Reply,
+    stream: Stream,
+    noctalia: noctalia::Reply,
     bus: Bus,
     mock: Mock,
     fixture: Fixture,
@@ -96,8 +96,8 @@ impl Desk {
         Self {
             server,
             _niri: niri,
-            _stream: stream,
-            _noctalia: noctalia,
+            stream,
+            noctalia,
             bus,
             mock,
             fixture,
@@ -389,4 +389,131 @@ async fn an_element_moved_to_another_window_of_its_app_is_stale() {
         .unwrap()
         .to_owned();
     refused(&mut desk, &moved, 3, "focus_mismatch").await;
+}
+
+/// What changes while an element action is still reading the element.
+#[derive(Debug, Clone, Copy)]
+enum Change {
+    /// Keyboard focus leaves the element's window.
+    FocusMoved,
+    ScreenLocked,
+    /// Another server's input may be stuck.
+    InputDirty,
+    /// The lease file is replaced, so another server could lock the new one.
+    LeaseReplaced,
+    /// The element becomes a password field.
+    BecamePassword,
+}
+
+impl Desk {
+    /// Makes `change` happen to the element at `path`, seen by the server before this
+    /// returns. Returns the error it must refuse with.
+    async fn make(&mut self, change: Change, path: &str) -> &'static str {
+        match change {
+            Change::FocusMoved => {
+                self.stream
+                    .send(&json!({"WindowFocusChanged": {"id": null}}));
+                while !self.server.structured("desktop_state").await["focused_window"].is_null() {
+                    tokio::task::yield_now().await;
+                }
+                "focus_mismatch"
+            }
+            Change::ScreenLocked => {
+                self.noctalia.set(LOCKED);
+                "screen_locked"
+            }
+            Change::InputDirty => {
+                std::fs::write(self.fixture.runtime_dir().join("input-dirty"), "").unwrap();
+                "recovery_required"
+            }
+            Change::LeaseReplaced => {
+                let lease = self.fixture.runtime_dir().join("lease");
+                std::fs::remove_file(&lease).unwrap();
+                std::fs::write(&lease, "").unwrap();
+                "lease_required"
+            }
+            Change::BecamePassword => {
+                self.mock.change(path, |object| object.role = PASSWORD_TEXT);
+                "secret_field"
+            }
+        }
+    }
+}
+
+const CHANGES: [Change; 5] = [
+    Change::FocusMoved,
+    Change::ScreenLocked,
+    Change::InputDirty,
+    Change::LeaseReplaced,
+    Change::BecamePassword,
+];
+
+/// An element action held on a read of the element, before its last gate.
+struct Held {
+    tool: &'static str,
+    /// The element's name and path.
+    element: (&'static str, &'static str),
+    /// The read that is held.
+    read: &'static str,
+    /// The call that acts.
+    acts: &'static str,
+}
+
+/// Holds `held`'s read, makes `change` meanwhile, and checks that the call is refused and
+/// the call that acts never reaches the app.
+async fn refused_at_the_last_gate(held: &Held, change: Change) {
+    let (name, path) = held.element;
+    let mut desk = Desk::start(&format!("el-gate-{}-{}", held.read, change as u8)).await;
+    let element = desk.element(name).await;
+    let mut arguments = json!({"element": element, "expect": {"window_id": WINDOW}});
+    if held.tool == "set_element_text" {
+        arguments["text"] = json!("abc");
+    }
+    let reading = desk.mock.hold(held.read);
+    let id = desk.server.start_call(held.tool, arguments).await;
+    reading.arrived().await;
+    let expected = desk.make(change, path).await;
+    reading.release();
+    let result = desk.server.response(id).await["result"].clone();
+    assert_eq!(tool_error(&result).0, expected, "{change:?}: {result}");
+    assert_eq!(desk.mock.calls(held.acts), 0, "{change:?}");
+}
+
+#[tokio::test]
+async fn an_activation_is_refused_when_anything_changed_while_the_element_was_read() {
+    let held = Held {
+        tool: "activate_element",
+        element: ("Safe", "/button"),
+        read: "GetActions",
+        acts: "DoAction",
+    };
+    for change in CHANGES {
+        refused_at_the_last_gate(&held, change).await;
+    }
+}
+
+#[tokio::test]
+async fn setting_text_is_refused_when_anything_changed_while_the_element_was_read() {
+    let held = Held {
+        tool: "set_element_text",
+        element: ("Field", "/entry"),
+        read: "GetInterfaces",
+        acts: "SetTextContents",
+    };
+    for change in CHANGES {
+        refused_at_the_last_gate(&held, change).await;
+    }
+}
+
+#[tokio::test]
+async fn a_password_field_is_never_activated() {
+    let mut desk = Desk::start("el-password-activate").await;
+    desk.mock.change("/password", |object| {
+        object.actions = vec!["activate".to_owned()];
+    });
+    let password = desk.element("Secret").await;
+    let arguments = json!({"element": password, "expect": {"window_id": WINDOW}});
+    let refused = desk.server.call("activate_element", arguments).await;
+    assert_eq!(tool_error(&refused).0, "secret_field");
+    assert_eq!(desk.mock.calls("DoAction"), 0);
 }

@@ -556,16 +556,18 @@ pub(crate) fn refuse_window(
     denied(policy, app_id?, &format!("window {window}"))
 }
 
-/// `secret_field` for an element that is a password field, whose text is never written:
-/// its role is `password_text`. That is the one mark GTK 4 (`GtkPasswordEntry`, or an entry
-/// whose input purpose is a password or PIN), GTK 3 (an entry that hides its text) and Qt
-/// (a field in password echo mode) give one; no AT-SPI state says it. A field that only
-/// hides its text in GTK 4 is a plain `text` on the bus and can't be told apart.
+/// `secret_field` for an element the toolkit marks as a password field, which the element
+/// actions never act on, since activating one can submit it: its role is `password_text`.
+/// That is the one mark GTK 4 (`GtkPasswordEntry`, or an entry whose input purpose is a
+/// password or PIN), GTK 3 (an entry that hides its text) and Qt (a field in password echo
+/// mode) give one; no AT-SPI state says it. A GTK 4 entry that only hides its text has the
+/// role, states, interfaces and attributes of a plain entry (M9b fixes' nested run), so it
+/// can't be told apart and isn't refused.
 pub(crate) fn refuse_secret_field(role: &str) -> Option<ToolError> {
     (role == "password_text").then(|| {
         ToolError::new(
             ErrorName::SecretField,
-            "the element is a password field; its text is never set, and nothing was sent",
+            "the element is a password field; element actions never act on one, and nothing was sent",
         )
     })
 }
@@ -1211,7 +1213,7 @@ app_id = "foot"
     }
 
     #[test]
-    fn a_password_fields_text_is_never_set() {
+    fn a_password_field_is_never_acted_on() {
         let refused = refuse_secret_field("password_text").unwrap();
         assert_eq!(refused.name, ErrorName::SecretField);
         for role in ["text", "entry", "terminal", "document_text"] {

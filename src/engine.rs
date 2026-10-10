@@ -53,6 +53,27 @@ pub(crate) struct Engine {
     _guardian: Option<runner::Watcher>,
 }
 
+/// The action gate's checks for one session, which an element action asks again while
+/// it runs.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Recheck<'a> {
+    engine: &'a Engine,
+    session: &'a Session,
+}
+
+impl elements::actions::Recheck for Recheck<'_> {
+    async fn control(&self) -> Result<(), ToolError> {
+        // Boxed, because the readiness report makes a large future.
+        Box::pin(self.engine.refusal(self.session))
+            .await
+            .map_or(Ok(()), Err)
+    }
+
+    fn desk(&self) -> Result<(), ToolError> {
+        self.engine.desk.checkpoint(self.session)
+    }
+}
+
 /// What `release_desktop` returns.
 #[derive(Debug, Serialize)]
 pub(crate) struct Release {
@@ -188,6 +209,14 @@ impl Engine {
             keyboard: settings.keyboard.as_deref(),
             a11y: self.a11y.as_ref(),
         })
+    }
+
+    /// The action gate's checks for `session`, to ask again while its action runs.
+    pub(crate) const fn recheck<'a>(&'a self, session: &'a Session) -> Recheck<'a> {
+        Recheck {
+            engine: self,
+            session,
+        }
     }
 
     /// The screenshot ref named `id` of the lease `session` holds.

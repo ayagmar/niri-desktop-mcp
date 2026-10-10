@@ -32,8 +32,26 @@ pub(crate) struct Holder {
 pub(crate) struct Lease {
     file: File,
     holder: Holder,
-    path: std::path::PathBuf,
+    locked: Locked,
     record: std::path::PathBuf,
+}
+
+/// The file a lease locked, which can be checked without the lease itself.
+#[derive(Debug, Clone)]
+pub(crate) struct Locked {
+    path: std::path::PathBuf,
+    dev: u64,
+    ino: u64,
+}
+
+impl Locked {
+    /// Whether the lease's path still names the locked file. If it was removed or
+    /// replaced, another server could lock the new file, so the lease no longer excludes
+    /// anyone.
+    pub(crate) fn intact(&self) -> bool {
+        std::fs::metadata(&self.path)
+            .is_ok_and(|named| named.dev() == self.dev && named.ino() == self.ino)
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +84,12 @@ impl Lease {
             Err(TryLockError::WouldBlock) => return Err(Refused::Held(holder(runtime))),
             Err(TryLockError::Error(error)) => return Err(io("lock", &path, error)),
         }
+        let opened = file.metadata().map_err(|error| io("stat", &path, error))?;
+        let locked = Locked {
+            dev: opened.dev(),
+            ino: opened.ino(),
+            path,
+        };
         let holder = Holder {
             pid: std::process::id(),
             label: label.to_owned(),
@@ -76,7 +100,7 @@ impl Lease {
         Ok(Self {
             file,
             holder,
-            path,
+            locked,
             record,
         })
     }
@@ -85,13 +109,13 @@ impl Lease {
         &self.holder
     }
 
-    /// Whether `lease` still names the locked file. If it was removed or replaced, another
-    /// server could lock the new file, so this lease no longer excludes anyone.
+    /// Whether `lease` still names the locked file; see `Locked::intact`.
     pub(crate) fn intact(&self) -> bool {
-        match (self.file.metadata(), std::fs::metadata(&self.path)) {
-            (Ok(locked), Ok(named)) => locked.dev() == named.dev() && locked.ino() == named.ino(),
-            _ => false,
-        }
+        self.locked.intact()
+    }
+
+    pub(crate) const fn locked(&self) -> &Locked {
+        &self.locked
     }
 }
 

@@ -143,9 +143,9 @@ An agent should stop and tell you when it gets one of these. Calling the action 
 
 ### `secret_field`
 
-**Cause:** `set_element_text` was aimed at a password field: an element whose role is `password_text`, as GTK 4's password entry, GTK 3's and Qt's entries that hide their text, and fields for a password or PIN are. Its text is never set, and nothing was sent.
+**Cause:** `activate_element` or `set_element_text` was aimed at a field the toolkit marks as a password field: an element whose role is `password_text`, as GTK 4's password entry and its entries for a password or PIN, GTK 3's entries that hide their text and Qt's password fields are. The role is read again right before acting, so a field that became one is refused too. Nothing was sent.
 
-**What to do:** have the user type it.
+**What to do:** have the user type it. A field that only hides its text may not be marked: a GTK 4 entry that hides its text without a password purpose is a plain `text` and isn't refused, so don't fill or activate a field that may hold a secret.
 
 ### `unrestricted_required`
 

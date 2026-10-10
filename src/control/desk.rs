@@ -63,6 +63,8 @@ struct Grant {
 struct Owner {
     session: SessionId,
     holder: Holder,
+    /// The lease's file, to check it is still the one locked.
+    locked: lease::Locked,
     /// The window that had keyboard focus when the lease was taken, to give it back to.
     users_window: Option<u64>,
 }
@@ -72,6 +74,7 @@ impl Seat {
         self.owner.send_replace(Some(Owner {
             session: grant.owner,
             holder: grant.lease.holder().clone(),
+            locked: grant.lease.locked().clone(),
             users_window,
         }));
         self.refs().start();
@@ -304,6 +307,24 @@ impl Desk {
         let finished = finish(done?).await;
         drop(held);
         Ok(finished)
+    }
+
+    /// The desk's checks before an action, asked again while `session`'s action runs, as an
+    /// element action does right before the one call that acts: neither the stop flag nor
+    /// the input-dirty marker is set, `session` holds the lease, and the lease file is
+    /// still the one locked. Doesn't wait for the action mutex, which the running action
+    /// holds.
+    pub(crate) fn checkpoint(&self, session: &Session) -> Result<(), ToolError> {
+        let runtime = self.runtime.as_ref().map_err(Clone::clone)?;
+        self.unblocked(runtime)?;
+        let owner = self
+            .seat
+            .owned_by(session.id())
+            .ok_or_else(lease_required)?;
+        if !owner.locked.intact() {
+            return Err(lease_moved("sent nothing"));
+        }
+        Ok(())
     }
 
     /// Checks that a stop can reach this server and that neither the stop flag nor the

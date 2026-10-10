@@ -2,8 +2,9 @@
 //! replaced, through the accessibility bus instead of the pointer or keyboard. They reach
 //! an app without any input event, so they get the keyboard's gates on the element's own
 //! window: it must still be the ref's, not be on the deny list, have keyboard focus, and
-//! match `expect`. The element is checked again right before the one call that acts, and
-//! nothing is retried. That call only says the app took the request (research A4), so
+//! match `expect`. A last gate right before the one call that acts asks all of that
+//! again, with the action gate's own checks and the element as it is then, and nothing is
+//! retried. That call only says the app took the request (research A4), so
 //! the result is what was observed afterwards. Names and text are never returned or
 //! logged.
 
@@ -19,7 +20,7 @@ use crate::error::{CallError, ErrorName, ToolError};
 use crate::input::Input;
 use crate::input::keyboard::{self, Expect, Focus};
 use crate::niri;
-use crate::niri::waiter::{View, Waited};
+use crate::niri::waiter::{View, Waited, Waiter};
 use crate::policy::{self, Loaded};
 use niri_ipc::Window;
 
@@ -158,13 +159,69 @@ pub(crate) fn logged(
     json!({"element": id, "role": role, "action": kind, "action_index": index, "expect": expect})
 }
 
+/// The action gate's checks, which an element action asks again right before its call,
+/// since reading the element takes time.
+pub(crate) trait Recheck: Sync {
+    /// The policy's answer from a fresh readiness report: niri, the policy file and the
+    /// lock screen.
+    fn control(&self) -> impl Future<Output = Result<(), ToolError>> + Send;
+    /// The desk's: the stop flag, the input-dirty marker and the lease.
+    fn desk(&self) -> Result<(), ToolError>;
+}
+
+/// What an element action's last gate checks: `expect`, and the action gate's checks.
+pub(crate) struct Gate<'a, R> {
+    pub(crate) expect: Expect,
+    pub(crate) recheck: &'a R,
+}
+
+/// What the last gate saw.
+struct Checked {
+    role: u32,
+    states: States,
+    focus: Focus,
+}
+
+impl<R: Recheck> Gate<'_, R> {
+    /// The last checks before the call that acts, slowest first so the ones that change
+    /// fastest are read nearest the call: the action gate's own checks again; the
+    /// element's role and states; then niri's events received so far, failing if the
+    /// stream was lost, and the window's focus, deny list and `expect` on them; and the
+    /// desk last. A change after them, before the app takes the call, isn't seen: niri,
+    /// the desk and the app are asked apart, and nothing makes those reads one step.
+    async fn last(
+        &self,
+        policy: &Loaded,
+        element: &ElementRef,
+        request: &Request,
+        waiter: &mut Waiter,
+    ) -> Result<Checked, CallError> {
+        self.recheck.control().await?;
+        let (role, states) = current(request, element).await?;
+        if let Waited::Lost(why) = waiter.until(Duration::ZERO, |_| None::<()>).await {
+            return Err(ToolError::new(
+                ErrorName::NiriUnavailable,
+                format!("{why}; nothing was sent"),
+            )
+            .into());
+        }
+        let focus = owner_focused(policy, waiter.view(), element, &self.expect)?;
+        self.recheck.desk()?;
+        Ok(Checked {
+            role,
+            states,
+            focus,
+        })
+    }
+}
+
 /// Takes the element's action `requested`, or its default one, and looks at the element
 /// a moment later.
 pub(crate) async fn activate(
     input: Input<'_>,
     element: &ElementRef,
     requested: Option<&str>,
-    expect: Expect,
+    gate: Gate<'_, impl Recheck>,
 ) -> Result<Outcome, CallError> {
     let a11y = accessible(input)?;
     let chosen =
@@ -180,10 +237,9 @@ pub(crate) async fn activate(
         index: chosen,
     };
     let mut waiter = niri::waiter(input.niri.events).await?;
-    let focus = owner_focused(input.policy, waiter.view(), element, &expect)?;
+    owner_focused(input.policy, waiter.view(), element, &gate.expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
     identify(&request, element, owner(waiter.view(), element)?).await?;
-    let (role, before) = current(&request, element).await?;
     let actions = request.actions(element).await.map_err(gone_is_stale)?;
     let index = actions
         .iter()
@@ -196,6 +252,9 @@ pub(crate) async fn activate(
                 action.index
             ))
         })?;
+    let checked = gate
+        .last(input.policy, element, &request, &mut waiter)
+        .await?;
     let dispatched = request
         .do_action(element, index)
         .await
@@ -211,16 +270,22 @@ pub(crate) async fn activate(
         Waited::Done(()) => After::WindowGone,
         Waited::Timeout | Waited::Lost(_) => After::Probed(request.state(element).await),
     };
-    let (observed, changes, detail) = activation(before, after);
+    let (observed, changes, detail) = activation(checked.states, after);
     let (states_set, states_cleared) = changes.unwrap_or_default();
     let acted = Acted {
-        role: model::role_name(role),
+        role: model::role_name(checked.role),
         action: Some(action),
         states_set,
         states_cleared,
         characters: None,
     };
-    Ok(done((observed, detail), lost, waiter.view(), focus, acted))
+    Ok(done(
+        (observed, detail),
+        lost,
+        waiter.view(),
+        checked.focus,
+        acted,
+    ))
 }
 
 /// Replaces the element's whole text with `text` and reads back how many characters it
@@ -229,18 +294,14 @@ pub(crate) async fn set_text(
     input: Input<'_>,
     element: &ElementRef,
     text: &str,
-    expect: Expect,
+    gate: Gate<'_, impl Recheck>,
 ) -> Result<Outcome, CallError> {
     check_text(text)?;
     let a11y = accessible(input)?;
-    let waiter = niri::waiter(input.niri.events).await?;
-    let focus = owner_focused(input.policy, waiter.view(), element, &expect)?;
+    let mut waiter = niri::waiter(input.niri.events).await?;
+    owner_focused(input.policy, waiter.view(), element, &gate.expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
     identify(&request, element, owner(waiter.view(), element)?).await?;
-    let (role, states) = current(&request, element).await?;
-    if let Some(refused) = policy::refuse_secret_field(model::role_name(role)) {
-        return Err(refused.into());
-    }
     let editable = request
         .editable_text(element)
         .await
@@ -250,7 +311,10 @@ pub(crate) async fn set_text(
             "the element has no EditableText interface, so its text can't be set".to_owned(),
         ));
     }
-    if !states.has(State::Editable) {
+    let checked = gate
+        .last(input.policy, element, &request, &mut waiter)
+        .await?;
+    if !checked.states.has(State::Editable) {
         return Err(CallError::InvalidArguments(
             "the element isn't in the `editable` state, so its text can't be set".to_owned(),
         ));
@@ -263,13 +327,19 @@ pub(crate) async fn set_text(
     let count = request.character_count(element).await;
     let (observed, characters, detail) = written(text.chars().count(), count);
     let acted = Acted {
-        role: model::role_name(role),
+        role: model::role_name(checked.role),
         action: None,
         states_set: Vec::new(),
         states_cleared: Vec::new(),
         characters,
     };
-    Ok(done((observed, detail), lost, waiter.view(), focus, acted))
+    Ok(done(
+        (observed, detail),
+        lost,
+        waiter.view(),
+        checked.focus,
+        acted,
+    ))
 }
 
 /// Refuses text over `MAX_TEXT` bytes before anything is asked.
@@ -338,9 +408,14 @@ fn owner<'a>(view: &'a View, element: &ElementRef) -> Result<&'a Window, ToolErr
         .ok_or_else(|| stale(&format!("window {} is gone", kept.window)))
 }
 
-/// The element's role and states now, if it is still the element listed and showing.
+/// The element's role and states now, if it is still the element listed, not a password
+/// field, and showing.
 async fn current(request: &Request, element: &ElementRef) -> Result<(u32, States), ToolError> {
     let (role, states) = request.state(element).await.map_err(gone_is_stale)?;
+    // Before the role is compared, so a field that became a password field says so.
+    if let Some(refused) = policy::refuse_secret_field(model::role_name(role)) {
+        return Err(refused);
+    }
     if role != element.kept.role {
         return Err(stale(&format!(
             "the element was a {} and is now a {}",
