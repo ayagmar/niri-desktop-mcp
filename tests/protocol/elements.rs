@@ -5,10 +5,13 @@
 use serde_json::{Value, json};
 
 use crate::atspi::{self, Bus, Mock, Object, PASSWORD_TEXT, TEXT};
-use crate::client::{Server, tool_error};
+use crate::client::{Server, mistake, tool_error};
 use crate::fixture::{Fixture, jpeg};
 use crate::niri::{Niri, Stream, window_on};
 use crate::noctalia::{self, UNLOCKED};
+
+/// An action name an app could put private text in.
+const ODD_ACTION: &str = "open ACTION-SENTINEL";
 
 /// The mock application's window.
 const WINDOW: u64 = 1;
@@ -33,8 +36,12 @@ struct Desk {
 fn objects() -> Vec<(&'static str, Object)> {
     vec![
         ("/frame", Object::frame("Mock", (800, 600), &["/panel"])),
-        ("/panel", Object::panel(&["/button", "/entry", "/password"])),
+        (
+            "/panel",
+            Object::panel(&["/button", "/odd", "/entry", "/password"]),
+        ),
         ("/button", Object::button("Safe", &["click"])),
+        ("/odd", Object::button("Odd", &[ODD_ACTION, "click"])),
         ("/entry", Object::entry(TEXT, "Field")),
         ("/password", Object::entry(PASSWORD_TEXT, "Secret")),
     ]
@@ -185,4 +192,48 @@ async fn the_apps_error_messages_reach_neither_the_result_nor_the_audit_log() {
     );
     let audit = std::fs::read_to_string(desk.fixture.audit_log()).unwrap();
     assert!(!audit.contains(SENTINEL), "{audit}");
+}
+
+#[tokio::test]
+async fn an_apps_action_names_reach_neither_errors_nor_the_audit_log() {
+    let mut desk = Desk::start("el-names").await;
+    let odd = desk.element("Odd").await;
+    let expect = json!({"window_id": WINDOW});
+    let named = json!({"element": odd, "action": ODD_ACTION, "expect": expect});
+    let taken = desk
+        .server
+        .structured_with("activate_element", named.clone())
+        .await;
+    assert_eq!(
+        taken["element"]["action"],
+        json!({"kind": "other", "index": 0})
+    );
+    let by_default = json!({"element": odd, "expect": expect});
+    let defaulted = desk
+        .server
+        .structured_with("activate_element", by_default)
+        .await;
+    assert_eq!(
+        defaulted["element"]["action"],
+        json!({"kind": "click", "index": 1})
+    );
+    let unlisted = json!({"element": odd, "action": "ACTION-SENTINEL", "expect": expect});
+    let mistake = mistake(&desk.server.call("activate_element", unlisted).await);
+    assert_eq!(
+        mistake,
+        "invalid arguments: `action` isn't one of the element's actions: the element has 2 actions, of the kinds other, click; elements lists them"
+    );
+    desk.mock.fail("DoAction", "no");
+    let refused = desk.server.call("activate_element", named.clone()).await;
+    assert_eq!(tool_error(&refused).0, "upstream_error");
+    let mut unknown = named;
+    unknown["element"] = json!("elem-00000000-999");
+    let unknown = desk.server.call("activate_element", unknown).await;
+    assert_eq!(tool_error(&unknown).0, "element_stale");
+    for result in [&refused, &unknown] {
+        assert!(!result.to_string().contains("SENTINEL"), "{result}");
+    }
+    let audit = std::fs::read_to_string(desk.fixture.audit_log()).unwrap();
+    assert!(!audit.contains("SENTINEL"), "{audit}");
+    assert_eq!(desk.mock.calls("DoAction"), 3);
 }

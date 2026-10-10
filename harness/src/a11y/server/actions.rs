@@ -17,6 +17,8 @@ const ACTIVATIONS: u32 = 20;
 /// How long a refused action has to show up anyway.
 const SETTLE: Duration = Duration::from_millis(500);
 const WAIT: Duration = Duration::from_secs(5);
+/// The action kinds the audit log may hold instead of an action's name.
+const KINDS: [&str; 5] = ["click", "press", "activate", "toggle", "other"];
 /// `set_element_text`'s most text, in bytes.
 const LARGEST: usize = 64 * 1024;
 /// The `app_id` the policy file denies, which the GTK 4 fixture's `Rename` button takes.
@@ -385,6 +387,12 @@ impl Checks<'_, '_> {
             expect(
                 !field(&entry, "/args/role").is_null() && !field(&entry, detail).is_null(),
                 "an element action logged with its role, and its action or length",
+                &entry,
+            )?;
+            let kind = field(&entry, "/args/action");
+            expect(
+                kind.is_null() || KINDS.iter().any(|known| kind == known),
+                "an element action logged with its action's kind, not its name",
                 &entry,
             )?;
             acted += 1;

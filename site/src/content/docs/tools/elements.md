@@ -90,7 +90,7 @@ An app's answer only says it took the request, so 300 ms later the server looks 
 - `gone`: the element or its window went away, as when a button closes its dialog;
 - `unknown`: it couldn't be read, with the reason in `detail`, and a screenshot comes with the result.
 
-`element.action` is the action taken. An action name the element didn't list, or no default action, is an argument mistake that lists its actions. An app that declines answers `upstream_error`.
+`element.action` is the action taken, as `kind` (`click`, `press`, `activate` or `toggle` for those names in any case, `other` for any other) and `index` among the element's `actions`. The server never repeats an action's name, which the app chose: an action name the element didn't list, or no default action, is an argument mistake that counts the element's actions and names their kinds. An app that declines answers `upstream_error`.
 
 ### `set_element_text`
 

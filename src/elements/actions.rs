@@ -24,8 +24,6 @@ use crate::policy::{self, Loaded};
 
 use super::stale;
 
-/// The actions `activate_element` takes by default: the element's first one among these.
-const DEFAULT_ACTIONS: [&str; 4] = ["click", "press", "activate", "toggle"];
 /// How long an activation's effect has to show before the element is looked at again.
 /// GTK 3 and GTK 4 buttons answer the action as they answer Enter: shown pressed for
 /// 250 ms (`ACTIVATE_TIMEOUT` in `gtkbutton.c`), then clicked. Qt acts at once. The
@@ -34,13 +32,55 @@ const SETTLE: Duration = Duration::from_millis(300);
 /// `set_element_text`'s most text, in bytes of UTF-8 (see docs/decisions.md).
 pub(crate) const MAX_TEXT: usize = 64 * 1024;
 
+/// What kind an action is, by its name. An app names its actions, and may put anything
+/// in a name, so only these are ever logged or said about one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ActionKind {
+    Click,
+    Press,
+    Activate,
+    Toggle,
+    /// Any other name.
+    Other,
+}
+
+impl ActionKind {
+    const DEFAULTS: [Self; 4] = [Self::Click, Self::Press, Self::Activate, Self::Toggle];
+
+    /// The kind of the action named `name`, in any case, as Qt names its `Press`.
+    fn of(name: &str) -> Self {
+        Self::DEFAULTS
+            .into_iter()
+            .find(|kind| name.eq_ignore_ascii_case(kind.name()))
+            .unwrap_or(Self::Other)
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Click => "click",
+            Self::Press => "press",
+            Self::Activate => "activate",
+            Self::Toggle => "toggle",
+            Self::Other => "other",
+        }
+    }
+}
+
+/// An action of an element: its kind and its index among the element's actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub(crate) struct Chosen {
+    pub(crate) kind: ActionKind,
+    pub(crate) index: usize,
+}
+
 /// What an element action did, without the element's name or text.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Acted {
     pub(crate) role: &'static str,
     /// `activate_element`: the action taken.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) action: Option<String>,
+    pub(crate) action: Option<Chosen>,
     /// `activate_element`, observed `present`: the states set since.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub(crate) states_set: Vec<&'static str>,
@@ -52,40 +92,48 @@ pub(crate) struct Acted {
     pub(crate) characters: Option<i32>,
 }
 
-/// The action `activate_element` takes among the element's `advertised` ones: `requested`,
-/// which must be one of them, or by default the first of them that is one of
-/// `DEFAULT_ACTIONS`, in any case, as Qt names its `Press`.
-pub(crate) fn choose_action<'a>(
-    advertised: &'a [String],
+/// The index of the action `activate_element` takes among the element's `advertised`
+/// ones: `requested`, which must be one of them, or by default the first of them whose
+/// kind is click, press, activate or toggle. A mistake says how many actions there are
+/// and of which kinds, never their names.
+pub(crate) fn choose_action(
+    advertised: &[String],
     requested: Option<&str>,
-) -> Result<&'a str, String> {
-    let listed = || format!("the element's actions are {advertised:?}");
+) -> Result<usize, String> {
+    let listed = || {
+        let mut kinds: Vec<&str> = Vec::new();
+        for action in advertised {
+            let kind = ActionKind::of(action).name();
+            if !kinds.contains(&kind) {
+                kinds.push(kind);
+            }
+        }
+        format!(
+            "the element has {} actions, of the kinds {}; elements lists them",
+            advertised.len(),
+            kinds.join(", ")
+        )
+    };
     if let Some(requested) = requested {
         return advertised
             .iter()
-            .find(|action| *action == requested)
-            .map(String::as_str)
-            .ok_or_else(|| format!("`action` {requested:?} isn't one of them: {}", listed()));
+            .position(|action| action == requested)
+            .ok_or_else(|| format!("`action` isn't one of the element's actions: {}", listed()));
     }
     advertised
         .iter()
-        .find(|action| {
-            DEFAULT_ACTIONS
-                .iter()
-                .any(|default| action.eq_ignore_ascii_case(default))
-        })
-        .map(String::as_str)
+        .position(|action| ActionKind::of(action) != ActionKind::Other)
         .ok_or_else(|| {
             format!(
-                "none of the element's actions is {}, so name one in `action`: {}",
-                DEFAULT_ACTIONS.join(", "),
+                "none of the element's actions is click, press, activate or toggle, so name one in `action`: {}",
                 listed()
             )
         })
 }
 
-/// What the audit log keeps of an element action's arguments: the ref, the role and
-/// action it names, the text's length, `expect` and `screenshot`. Never a name or text.
+/// What the audit log keeps of an element action's arguments: the ref, the role it was
+/// listed with, the kind and index of the action it names, the text's length, `expect` and
+/// `screenshot`. Never a name, text, or an action's own name.
 pub(crate) fn logged(
     id: &str,
     kept: Option<&ElementRef>,
@@ -97,10 +145,16 @@ pub(crate) fn logged(
     if let Some(text_len) = text_len {
         return json!({"element": id, "role": role, "text_len": text_len, "expect": expect});
     }
-    let action = kept.map_or(action, |element| {
-        choose_action(&element.kept.actions, action).ok().or(action)
-    });
-    json!({"element": id, "role": role, "action": action, "expect": expect})
+    let index = kept.and_then(|element| choose_action(&element.kept.actions, action).ok());
+    let kind = match (kept, index) {
+        (Some(element), Some(index)) => element
+            .kept
+            .actions
+            .get(index)
+            .map(|name| ActionKind::of(name)),
+        _ => action.map(ActionKind::of),
+    };
+    json!({"element": id, "role": role, "action": kind, "action_index": index, "expect": expect})
 }
 
 /// Takes the element's action `requested`, or its default one, and looks at the element
@@ -112,9 +166,18 @@ pub(crate) async fn activate(
     expect: Expect,
 ) -> Result<Outcome, CallError> {
     let a11y = accessible(input)?;
-    let action = choose_action(&element.kept.actions, requested)
-        .map_err(CallError::InvalidArguments)?
-        .to_owned();
+    let chosen =
+        choose_action(&element.kept.actions, requested).map_err(CallError::InvalidArguments)?;
+    let name = element
+        .kept
+        .actions
+        .get(chosen)
+        .cloned()
+        .unwrap_or_default();
+    let action = Chosen {
+        kind: ActionKind::of(&name),
+        index: chosen,
+    };
     let mut waiter = niri::waiter(input.niri.events).await?;
     let focus = owner_focused(input.policy, waiter.view(), element, &expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
@@ -122,15 +185,21 @@ pub(crate) async fn activate(
     let actions = request.actions(element).await.map_err(gone_is_stale)?;
     let index = actions
         .iter()
-        .position(|offered| *offered == action)
+        .position(|offered| *offered == name)
         .and_then(|index| i32::try_from(index).ok())
-        .ok_or_else(|| stale(&format!("the element no longer offers {action:?}")))?;
+        .ok_or_else(|| {
+            stale(&format!(
+                "the element no longer offers its {} action at index {}",
+                action.kind.name(),
+                action.index
+            ))
+        })?;
     if !request
         .do_action(element, index)
         .await
         .map_err(gone_is_stale)?
     {
-        return Err(refused_by_app(&format!("action {action:?}")).into());
+        return Err(refused_by_app(&format!("its {} action", action.kind.name())).into());
     }
     let window = element.kept.window;
     let after = match waiter
@@ -381,28 +450,39 @@ mod tests {
     #[test]
     fn the_default_action_is_the_elements_first_click_press_activate_or_toggle() {
         let gtk = names(&["click"]);
-        assert_eq!(choose_action(&gtk, None), Ok("click"));
+        assert_eq!(choose_action(&gtk, None), Ok(0));
         // Qt Quick's button: Press, then SetFocus.
         let qt = names(&["SetFocus", "Press"]);
-        assert_eq!(choose_action(&qt, None), Ok("Press"));
+        assert_eq!(choose_action(&qt, None), Ok(1));
         // The element's own order decides, not the list's.
         let entry = names(&["activate", "click"]);
-        assert_eq!(choose_action(&entry, None), Ok("activate"));
-        let label = names(&["clipboard.copy", "link.open"]);
-        let refused = choose_action(&label, None).unwrap_err();
-        assert!(refused.contains("clipboard.copy"), "{refused}");
+        assert_eq!(choose_action(&entry, None), Ok(0));
         assert!(choose_action(&[], None).is_err());
     }
 
     #[test]
-    fn a_requested_action_must_be_one_the_element_listed() {
+    fn a_requested_action_must_be_one_the_element_listed_exactly() {
         let frame = names(&["window.close", "default.activate"]);
-        assert_eq!(
-            choose_action(&frame, Some("window.close")),
-            Ok("window.close")
+        assert_eq!(choose_action(&frame, Some("default.activate")), Ok(1));
+        assert!(choose_action(&frame, Some("Window.Close")).is_err());
+    }
+
+    #[test]
+    fn a_mistake_counts_the_actions_and_names_their_kinds_never_the_apps_names() {
+        let label = names(&["SECRET-1 copy", "SECRET-2", "Toggle"]);
+        for requested in [None, Some("SECRET-3")] {
+            let mistake = choose_action(&label[..2], requested).unwrap_err();
+            assert!(!mistake.contains("SECRET"), "{mistake}");
+            assert!(
+                mistake.contains("2 actions, of the kinds other;"),
+                "{mistake}"
+            );
+        }
+        let mistake = choose_action(&label, Some("SECRET-3")).unwrap_err();
+        assert!(
+            mistake.contains("3 actions, of the kinds other, toggle;"),
+            "{mistake}"
         );
-        let refused = choose_action(&frame, Some("Window.Close")).unwrap_err();
-        assert!(refused.contains("default.activate"), "{refused}");
     }
 
     #[test]
@@ -533,22 +613,25 @@ mod tests {
     }
 
     #[test]
-    fn the_log_keeps_the_role_action_and_length_never_a_name_or_text() {
-        let button = element(3, &["SetFocus", "Press"]);
+    fn the_log_keeps_the_role_actions_kind_and_index_and_length_never_a_name_or_text() {
+        let button = element(3, &["SECRET-1", "Press"]);
+        let expect = json!({"window_id": 3});
         assert_eq!(
-            logged(
-                "elem-t-1",
-                Some(&button),
-                None,
-                None,
-                &json!({"window_id": 3})
-            ),
-            json!({"element": "elem-t-1", "role": "button", "action": "Press", "expect": {"window_id": 3}})
+            logged("elem-t-1", Some(&button), None, None, &expect),
+            json!({"element": "elem-t-1", "role": "button", "action": "press", "action_index": 1, "expect": expect})
         );
-        // An unknown ref logs what was asked.
         assert_eq!(
-            logged("elem-t-9", None, Some("click"), None, &json!("none")),
-            json!({"element": "elem-t-9", "role": null, "action": "click", "expect": "none"})
+            logged("elem-t-1", Some(&button), Some("SECRET-1"), None, &expect),
+            json!({"element": "elem-t-1", "role": "button", "action": "other", "action_index": 0, "expect": expect})
+        );
+        // An action the element didn't list, or an unknown ref, logs the kind asked for.
+        assert_eq!(
+            logged("elem-t-1", Some(&button), Some("SECRET-2"), None, &expect),
+            json!({"element": "elem-t-1", "role": "button", "action": "other", "action_index": null, "expect": expect})
+        );
+        assert_eq!(
+            logged("elem-t-9", None, Some("Click"), None, &json!("none")),
+            json!({"element": "elem-t-9", "role": null, "action": "click", "action_index": null, "expect": "none"})
         );
         assert_eq!(
             logged(
