@@ -449,19 +449,11 @@ pub(crate) struct Kept {
     pub(crate) pid: i32,
     /// The action names it listed, which `activate_element` chooses from.
     pub(crate) actions: Vec<String>,
-    pub(crate) lineage: Lineage,
-}
-
-/// What tells a listed element apart from another object that took its path, as a
-/// virtualized list reuses its rows: where it was in its window's tree, and its name.
-/// Private: never logged or returned.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct Lineage {
-    /// Each object from the frame's child down to the element: its path and its index
-    /// among its parent's children.
-    pub(crate) chain: Vec<(String, i32)>,
-    /// A hash of its accessible name, keyed for this process.
-    pub(crate) name: u64,
+    /// Where it was in its window's tree, to tell it apart from another object that took
+    /// its path, as a virtualized list reuses its rows: each object from the frame's child
+    /// down to the element, with its path and its index among its parent's children.
+    /// Never logged or returned.
+    pub(crate) lineage: Vec<(String, i32)>,
 }
 
 /// The element and its window as they are now.
@@ -684,7 +676,7 @@ mod tests {
             window: 3,
             pid: 4711,
             actions: Vec::new(),
-            lineage: Lineage::default(),
+            lineage: Vec::new(),
         };
         let shown = placement(
             extents(40, 70, 320, 34),

@@ -464,7 +464,7 @@ mod tests {
                 window,
                 pid: 1,
                 actions: names(actions),
-                lineage: model::Lineage::default(),
+                lineage: Vec::new(),
             },
         }
     }

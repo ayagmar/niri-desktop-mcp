@@ -5,15 +5,10 @@
 
 pub(crate) mod actions;
 
-use std::hash::{BuildHasher as _, RandomState};
-use std::sync::OnceLock;
-
 use niri_ipc::Window;
 use serde::Serialize;
 
-use crate::a11y::model::{
-    self, Extents, Filter, Fresh, LayoutBox, Lineage, Placement, Refused, Unmappable,
-};
+use crate::a11y::model::{self, Extents, Filter, Fresh, LayoutBox, Placement, Refused, Unmappable};
 use crate::a11y::{self, A11y, Capped, ElementRef, Failed, Node, Want};
 use crate::coords::LayoutPt;
 use crate::error::{CallError, ErrorName, ToolError};
@@ -141,10 +136,7 @@ pub(crate) async fn list(
                 window: window.id,
                 pid,
                 actions: node.actions.clone(),
-                lineage: Lineage {
-                    chain: walked.lineage(at),
-                    name: name_hash(&node.name),
-                },
+                lineage: walked.lineage(at),
             },
         });
         elements.push(Listed {
@@ -216,18 +208,12 @@ pub(crate) async fn aim(
     }
 }
 
-/// A hash of an element's name, keyed for this process, so a ref can tell whether the name
-/// changed without keeping it.
-fn name_hash(name: &str) -> u64 {
-    static KEYS: OnceLock<RandomState> = OnceLock::new();
-    KEYS.get_or_init(RandomState::new).hash_one(name)
-}
-
 /// Checks that `element` is still the object `elements` listed, not another that took its
 /// path: its application still has niri's `window`, whose accessible frame, found again,
-/// is the ref's; each object from that frame down to the element is still at the index
-/// it had among its parent's children, as the parent says; and its name is the one it
-/// had. Otherwise `element_stale`. Its role is checked by the caller.
+/// is the ref's; and each object from that frame down to the element is still at the
+/// index it had among its parent's children, as the parent says. Otherwise
+/// `element_stale`. Its role is checked by the caller. Its name isn't: buttons relabel
+/// themselves when used, as counters and play buttons do.
 pub(crate) async fn identify(
     request: &a11y::Request,
     element: &ElementRef,
@@ -255,7 +241,7 @@ pub(crate) async fn identify(
         )));
     }
     let mut parent = element.frame.as_str();
-    for (path, index) in &element.kept.lineage.chain {
+    for (path, index) in &element.kept.lineage {
         let (bus, child) = request
             .child_at(&element.bus, parent, *index)
             .await
@@ -266,10 +252,6 @@ pub(crate) async fn identify(
             ));
         }
         parent = path;
-    }
-    let name = request.element_name(element).await.map_err(gone_is_stale)?;
-    if name_hash(&name) != element.kept.lineage.name {
-        return Err(stale("the element's name changed"));
     }
     Ok(())
 }

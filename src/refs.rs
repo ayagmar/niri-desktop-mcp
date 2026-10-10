@@ -504,7 +504,7 @@ mod tests {
                 window: 3,
                 pid: 4711,
                 actions: Vec::new(),
-                lineage: crate::a11y::model::Lineage::default(),
+                lineage: Vec::new(),
             },
         };
         let stale = |refs: &Refs, id: &str| refs.element(id).unwrap_err().name;

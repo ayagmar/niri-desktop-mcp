@@ -333,22 +333,25 @@ async fn refused(desk: &mut Desk, element: &str, window: u64, error: &str) {
 async fn another_object_at_a_listed_elements_path_is_stale() {
     let mut desk = Desk::start("el-same-path").await;
     let button = desk.element("Safe").await;
-    // A virtualized list reuses the object for another record: same path, role and action.
-    desk.mock.change("/button", |object| {
-        object.name = "Delete another record".to_owned();
+    // A virtualized list reuses the object for another record and moves it among its
+    // parent's children: same path, role and action.
+    desk.mock.change("/panel", |panel| {
+        panel.children.retain(|child| child != "/button");
+        panel.children.push("/button".to_owned());
     });
     refused(&mut desk, &button, WINDOW, "element_stale").await;
-    // Back to its name, but no longer among its parent's children.
-    desk.mock.change("/button", |object| {
-        object.name = "Safe".to_owned();
-    });
+    // No longer among its parent's children at all.
     desk.mock.change("/panel", |panel| {
         panel.children.retain(|child| child != "/button");
     });
     refused(&mut desk, &button, WINDOW, "element_stale").await;
-    // Back in place, it is the element listed again.
+    // Back in place, it is the element listed again, though it relabelled itself as a
+    // counter does.
     desk.mock.change("/panel", |panel| {
         panel.children.insert(0, "/button".to_owned());
+    });
+    desk.mock.change("/button", |object| {
+        object.name = "Safe: 1".to_owned();
     });
     let arguments = json!({"element": button, "expect": {"window_id": WINDOW}});
     let result = desk.server.call("activate_element", arguments).await;

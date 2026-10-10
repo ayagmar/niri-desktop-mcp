@@ -497,11 +497,6 @@ impl Request {
         Ok(String::try_from(value).unwrap_or_default())
     }
 
-    /// The kept element's accessible name now.
-    pub(crate) async fn element_name(&self, element: &ElementRef) -> Result<String, Failed> {
-        self.name(element.at()).await
-    }
-
     /// The child at `index` among all the children of the object at `parent` in
     /// application `bus`: its bus name and path.
     pub(crate) async fn child_at(
