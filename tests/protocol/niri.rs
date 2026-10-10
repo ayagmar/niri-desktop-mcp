@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use niri_ipc::{Action, LogicalOutput, Output, Reply, Request, Response, Transform};
+use niri_ipc::{
+    Action, LogicalOutput, Output, Reply, Request, Response, Transform, Window, Workspace,
+};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
@@ -21,6 +23,9 @@ use crate::fixture::Fixture;
 struct Config {
     outputs: Vec<Output>,
     focused: Option<String>,
+    /// The answers to `Windows` and `Workspaces`.
+    windows: Vec<Window>,
+    workspaces: Vec<Workspace>,
     /// Read requests but never answer them.
     silent: bool,
     /// Read actions but never answer them.
@@ -71,6 +76,8 @@ impl Niri {
         let config = Arc::new(Mutex::new(Config {
             outputs: vec![output("DP-1", Some((0, 0, 2560, 1440, 1.0)))],
             focused: Some("DP-1".to_owned()),
+            windows: Vec::new(),
+            workspaces: Vec::new(),
             silent: false,
             hold_actions: false,
         }));
@@ -125,6 +132,14 @@ impl Niri {
         config.focused = focused.map(str::to_owned);
     }
 
+    /// What `Windows` and `Workspaces` are answered with, as the event stream describes
+    /// them.
+    pub(crate) fn set_windows(&self, windows: &[Value], workspaces: &[Value]) {
+        let mut config = self.config.lock().unwrap();
+        config.windows = parsed(windows);
+        config.workspaces = parsed(workspaces);
+    }
+
     pub(crate) fn set_silent(&self, silent: bool) {
         self.config.lock().unwrap().silent = silent;
     }
@@ -157,6 +172,13 @@ impl Niri {
             .await
             .is_ok_and(|message| message.is_some())
     }
+}
+
+fn parsed<T: serde::de::DeserializeOwned>(values: &[Value]) -> Vec<T> {
+    values
+        .iter()
+        .map(|value| serde_json::from_value(value.clone()).unwrap())
+        .collect()
 }
 
 /// Serves each connection to `listener`, noting its peer's process ID in `peers`.
@@ -290,11 +312,13 @@ async fn serve(connection: UnixStream, channels: Channels) {
 
 #[expect(
     clippy::wildcard_enum_match_arm,
-    reason = "the server only sends these three; any other request is an error, as from niri"
+    reason = "the server only sends these five; any other request is an error, as from niri"
 )]
 fn answer(config: &Config, request: &Request) -> Reply {
     match request {
         Request::Version => Ok(Response::Version("26.04 (protocol-test)".to_owned())),
+        Request::Windows => Ok(Response::Windows(config.windows.clone())),
+        Request::Workspaces => Ok(Response::Workspaces(config.workspaces.clone())),
         Request::Outputs => Ok(Response::Outputs(
             config
                 .outputs

@@ -117,7 +117,7 @@ pub(crate) async fn activate(
         .to_owned();
     let mut waiter = niri::waiter(input.niri.events).await?;
     let focus = owner_focused(input.policy, waiter.view(), element, &expect)?;
-    let request = a11y.request(a11y::BUDGET).await?;
+    let request = a11y.request(a11y::BUDGET).await?.names_only();
     let (role, before) = current(&request, element).await?;
     let actions = request.actions(element).await.map_err(gone_is_stale)?;
     let index = actions
@@ -166,7 +166,7 @@ pub(crate) async fn set_text(
     let a11y = accessible(input)?;
     let waiter = niri::waiter(input.niri.events).await?;
     let focus = owner_focused(input.policy, waiter.view(), element, &expect)?;
-    let request = a11y.request(a11y::BUDGET).await?;
+    let request = a11y.request(a11y::BUDGET).await?.names_only();
     let (role, states) = current(&request, element).await?;
     if let Some(refused) = policy::refuse_secret_field(model::role_name(role)) {
         return Err(refused.into());

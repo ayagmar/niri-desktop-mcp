@@ -27,10 +27,12 @@ cargo test --locked --test protocol
 Each test gets a directory of its own under `/tmp`, whatever `TMPDIR` says, because the fake sockets inside it must fit the 108-byte limit on Unix socket paths. It starts the server with only seven variables set, all pointing into it:
 
 - `PATH` holds fake `grim`, `wl-paste`, `loginctl` and `noctalia` scripts and nothing else.
-- `NIRI_SOCKET` is a fake niri that answers `Version`, `Outputs` and `FocusedOutput` and lets the test write each event stream line by line.
+- `NIRI_SOCKET` is a fake niri that answers `Version`, `Outputs`, `FocusedOutput`, `Windows` and `Workspaces` and lets the test write each event stream line by line.
 - `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY` lead to a fake Noctalia socket when the test starts one.
 - `XDG_SESSION_ID` is `7`. The server ignores it: the lock state asks logind about niri's own session, which the lock tests set by running the fake niri as a process of its own (`tests/protocol/session.rs`).
 - `XDG_STATE_HOME` keeps the audit log inside the directory, and `XDG_CONFIG_HOME` the policy file.
+
+The element tests (`tests/protocol/elements.rs`) add an eighth, `DBUS_SESSION_BUS_ADDRESS`: a `dbus-daemon` of the test's own (from `dbus`), listening only in the test's directory with no service directories, which serves as both the session bus and the accessibility bus. On it, `tests/protocol/atspi.rs` runs a mock application that answers AT-SPI as a toolkit does, and whose objects, and the next reply of each method, the test changes, holds or fails. Its names and text are synthetic.
 
 Nothing reaches your desktop, clipboard, session or audit log.
 
@@ -46,6 +48,7 @@ The tests check:
 - event-stream reconnects that never serve the previous desktop, and the malformed-event rule
 - Noctalia running, stopped and absent, the lock state's sources, and the clipboard's three outcomes
 - the audit log's lines, modes and contents, and a failed write showing in `status`
+- the element actions against the mock application: what reaches it, and that its error messages reach neither the result nor the audit log
 
 The `grim` deadline test takes five seconds, the length of that deadline.
 

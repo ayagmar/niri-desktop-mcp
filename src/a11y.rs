@@ -144,6 +144,7 @@ impl A11y {
             connection,
             deadline,
             shared: Arc::clone(&self.connection),
+            names_only: false,
         })
     }
 }
@@ -156,6 +157,9 @@ pub(crate) struct Request {
     /// Cleared when a call fails other than with a D-Bus error, so the next request
     /// connects again.
     shared: Arc<tokio::sync::Mutex<Option<Connection>>>,
+    /// Whether a failure says only the D-Bus error's name, never the message the
+    /// application wrote with it.
+    names_only: bool,
 }
 
 /// Why a call didn't answer.
@@ -195,6 +199,14 @@ pub(crate) struct FoundFrame {
 }
 
 impl Request {
+    /// The same request, whose failures leave out the messages that come with D-Bus
+    /// errors. An application writes those, and may put the text of a field in them; the
+    /// element actions promise never to return or log that (see docs/decisions.md).
+    pub(crate) const fn names_only(mut self) -> Self {
+        self.names_only = true;
+        self
+    }
+
     /// Calls `method` and reads its reply as `R`, within the call deadline and what is
     /// left of the budget.
     async fn call<B, R>(
@@ -222,21 +234,34 @@ impl Request {
         reply
             .body()
             .deserialize::<R>()
-            .map_err(|error| Failed::Error(upstream(&what, &error)))
+            .map_err(|error| Failed::Error(self.upstream(&what, &error)))
     }
 
     async fn failed(&self, what: &str, error: zbus::Error) -> Failed {
-        if let zbus::Error::MethodError(name, detail, _) = &error {
+        if let zbus::Error::MethodError(name, _, _) = &error {
             if GONE.contains(&name.as_str()) {
-                return Failed::Gone(format!(
-                    "{what}: {name}: {}",
-                    detail.as_deref().unwrap_or("")
-                ));
+                return Failed::Gone(self.upstream(what, &error).detail);
             }
-            return Failed::Refused(upstream(what, &error));
+            return Failed::Refused(self.upstream(what, &error));
         }
         *self.shared.lock().await = None;
-        Failed::Error(upstream(what, &error))
+        Failed::Error(self.upstream(what, &error))
+    }
+
+    /// `upstream_error` for a failed call: the whole error, or with `names_only` its
+    /// name alone.
+    fn upstream(&self, what: &str, error: &zbus::Error) -> ToolError {
+        if !self.names_only {
+            return upstream(what, error);
+        }
+        let named = if let zbus::Error::MethodError(name, _, _) = error {
+            name.to_string()
+        } else if let zbus::Error::InputOutput(error) = error {
+            error.to_string()
+        } else {
+            "the connection failed or the reply couldn't be read".to_owned()
+        };
+        ToolError::new(ErrorName::UpstreamError, format!("{what}: {named}"))
     }
 
     /// The applications the registry lists, with the process ID the bus gives each.
@@ -477,10 +502,10 @@ impl Request {
                 &(TEXT, "CharacterCount"),
             )
             .await?;
-        i32::try_from(value).map_err(|error| {
+        i32::try_from(value).map_err(|_| {
             Failed::Error(ToolError::new(
                 ErrorName::UpstreamError,
-                format!("{TEXT}.CharacterCount on {}: {error}", element.bus),
+                format!("{TEXT}.CharacterCount on {}: not an integer", element.bus),
             ))
         })
     }

@@ -6,6 +6,8 @@
 //! test code too.
 
 #[cfg(test)]
+mod atspi;
+#[cfg(test)]
 mod client;
 #[cfg(test)]
 mod fixture;
@@ -27,6 +29,8 @@ mod cancellation;
 mod control;
 #[cfg(test)]
 mod discovery;
+#[cfg(test)]
+mod elements;
 #[cfg(test)]
 mod engine;
 #[cfg(test)]

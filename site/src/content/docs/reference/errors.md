@@ -171,7 +171,7 @@ These mean niri, a program or Noctalia didn't answer as expected. Report the nam
 
 ### `upstream_error`
 
-**Cause:** niri, a program, Noctalia or an app on the accessibility bus answered with an error or with something unreadable; the `detail` keeps its message, exit status and stderr. For `activate_element` and `set_element_text`, also when the app refused the action or the text. Also when the server's runtime directory was removed while it ran, which cancels a running action.
+**Cause:** niri, a program, Noctalia or an app on the accessibility bus answered with an error or with something unreadable; the `detail` keeps its message, exit status and stderr. For `activate_element` and `set_element_text`, also when the app refused the action or the text; their `detail` names the call and the D-Bus error's name but not the message that came with it, which the app writes and could hold a field's text. Also when the server's runtime directory was removed while it ran, which cancels a running action.
 
 **What to do:** read the `detail`. After a removed runtime directory, restart the agent's session.
 
