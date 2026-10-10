@@ -2,6 +2,8 @@
 //! reaches the application, what is refused before anything does, and what the result and
 //! the audit log say. Every name and text is synthetic.
 
+use std::time::Duration;
+
 use serde_json::{Value, json};
 
 use crate::atspi::{self, Bus, Mock, Object, PASSWORD_TEXT, TEXT};
@@ -26,7 +28,7 @@ struct Desk {
     _niri: Niri,
     _stream: Stream,
     _noctalia: noctalia::Reply,
-    _bus: Bus,
+    bus: Bus,
     mock: Mock,
     fixture: Fixture,
 }
@@ -85,7 +87,7 @@ impl Desk {
             _niri: niri,
             _stream: stream,
             _noctalia: noctalia,
-            _bus: bus,
+            bus,
             mock,
             fixture,
         }
@@ -236,4 +238,73 @@ async fn an_apps_action_names_reach_neither_errors_nor_the_audit_log() {
     let audit = std::fs::read_to_string(desk.fixture.audit_log()).unwrap();
     assert!(!audit.contains("SENTINEL"), "{audit}");
     assert_eq!(desk.mock.calls("DoAction"), 3);
+}
+
+/// An outcome whose reply was lost: `uncertain`, with nothing said accepted, a
+/// screenshot, and the audit log saying the same.
+fn assert_uncertain(desk: &Desk, tool: &str, result: &Value) {
+    assert_eq!(result["isError"], false, "{result}");
+    let outcome = &result["structuredContent"];
+    assert_eq!(outcome["accepted"], Value::Null, "{outcome}");
+    assert_eq!(outcome["observed"], "uncertain", "{outcome}");
+    assert!(
+        outcome["detail"]
+            .as_str()
+            .unwrap()
+            .contains("the call went out, so the app may have acted"),
+        "{outcome}"
+    );
+    assert_eq!(result["content"][1]["type"], "image", "{result}");
+    let line = desk.fixture.audit_lines().pop().unwrap();
+    assert_eq!(line["tool"], tool);
+    assert_eq!(line["accepted"], Value::Null, "{line}");
+    assert_eq!(line["observed"], "uncertain", "{line}");
+}
+
+#[tokio::test]
+async fn a_reply_that_comes_too_late_is_uncertain_and_never_retried() {
+    let mut desk = Desk::start("el-late").await;
+    let button = desk.element("Safe").await;
+    let entry = desk.element("Field").await;
+    let expect = json!({"window_id": WINDOW});
+    desk.mock.delay("DoAction", Duration::from_millis(1500));
+    let activated = desk
+        .server
+        .call(
+            "activate_element",
+            json!({"element": button, "expect": expect}),
+        )
+        .await;
+    assert_uncertain(&desk, "activate_element", &activated);
+    assert_eq!(desk.mock.calls("DoAction"), 1);
+    desk.mock
+        .delay("SetTextContents", Duration::from_millis(1500));
+    let set = json!({"element": entry, "text": "abc", "expect": expect});
+    let set = desk.server.call("set_element_text", set).await;
+    assert_uncertain(&desk, "set_element_text", &set);
+    assert_eq!(desk.mock.calls("SetTextContents"), 1);
+}
+
+#[tokio::test]
+async fn a_bus_lost_after_the_call_went_out_is_uncertain() {
+    for (tool, member) in [
+        ("activate_element", "DoAction"),
+        ("set_element_text", "SetTextContents"),
+    ] {
+        let mut desk = Desk::start("el-lost").await;
+        let name = if tool == "activate_element" {
+            "Safe"
+        } else {
+            "Field"
+        };
+        let element = desk.element(name).await;
+        let held = desk.mock.hold(member);
+        let arguments = json!({"element": element, "text": "abc", "expect": {"window_id": WINDOW}});
+        let id = desk.server.start_call(tool, arguments).await;
+        held.arrived().await;
+        desk.bus.kill().await;
+        let result = desk.server.response(id).await["result"].clone();
+        assert_uncertain(&desk, tool, &result);
+        assert_eq!(desk.mock.calls(member), 1);
+    }
 }

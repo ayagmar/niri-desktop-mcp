@@ -13,7 +13,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 
 use crate::a11y::model::{self, State, States};
-use crate::a11y::{self, A11y, ElementRef, Failed, Request};
+use crate::a11y::{self, A11y, Dispatched, ElementRef, Failed, Request};
 use crate::act::{Observed, Outcome};
 use crate::error::{CallError, ErrorName, ToolError};
 use crate::input::Input;
@@ -194,13 +194,11 @@ pub(crate) async fn activate(
                 action.index
             ))
         })?;
-    if !request
+    let dispatched = request
         .do_action(element, index)
         .await
-        .map_err(gone_is_stale)?
-    {
-        return Err(refused_by_app(&format!("its {} action", action.kind.name())).into());
-    }
+        .map_err(gone_is_stale)?;
+    let lost = taken(dispatched, &format!("its {} action", action.kind.name()))?;
     let window = element.kept.window;
     let after = match waiter
         .until(SETTLE, |view| {
@@ -220,7 +218,7 @@ pub(crate) async fn activate(
         states_cleared,
         characters: None,
     };
-    Ok(done(observed, waiter.view(), focus, acted, detail))
+    Ok(done((observed, detail), lost, waiter.view(), focus, acted))
 }
 
 /// Replaces the element's whole text with `text` and reads back how many characters it
@@ -254,13 +252,11 @@ pub(crate) async fn set_text(
             "the element isn't in the `editable` state, so its text can't be set".to_owned(),
         ));
     }
-    if !request
+    let dispatched = request
         .set_text(element, text)
         .await
-        .map_err(gone_is_stale)?
-    {
-        return Err(refused_by_app("the new text").into());
-    }
+        .map_err(gone_is_stale)?;
+    let lost = taken(dispatched, "the new text")?;
     let count = request.character_count(element).await;
     let (observed, characters, detail) = written(text.chars().count(), count);
     let acted = Acted {
@@ -270,7 +266,7 @@ pub(crate) async fn set_text(
         states_cleared: Vec::new(),
         characters,
     };
-    Ok(done(observed, waiter.view(), focus, acted, detail))
+    Ok(done((observed, detail), lost, waiter.view(), focus, acted))
 }
 
 /// Refuses text over `MAX_TEXT` bytes before anything is asked.
@@ -392,18 +388,44 @@ fn written(expected: usize, count: Result<i32, Failed>) -> (Observed, Option<i32
     }
 }
 
-fn done(
-    observed: Observed,
-    view: &View,
-    focus: Focus,
-    acted: Acted,
-    detail: Option<String>,
-) -> Outcome {
+/// What was observed after the call, and why it is `unknown`.
+type Seen = (Observed, Option<String>);
+
+/// The outcome: what was `seen` afterwards, or, when the call's reply was `lost`,
+/// `uncertain` with `accepted: null`, saying what was seen in `detail`.
+fn done(seen: Seen, lost: Option<String>, view: &View, focus: Focus, acted: Acted) -> Outcome {
+    let (observed, detail) = seen;
+    let Some(lost) = lost else {
+        return Outcome {
+            focus: Some(focus),
+            element: Some(acted),
+            detail,
+            ..Outcome::seen(observed, view, Vec::new())
+        };
+    };
+    let afterwards = serde_json::to_value(observed)
+        .ok()
+        .and_then(|name| name.as_str().map(str::to_owned))
+        .unwrap_or_default();
+    let why = detail.map_or_else(String::new, |detail| format!(" ({detail})"));
     Outcome {
         focus: Some(focus),
         element: Some(acted),
-        detail,
-        ..Outcome::seen(observed, view, Vec::new())
+        ..Outcome::uncertain(
+            None,
+            Some(view),
+            format!("{lost}; afterwards: {afterwards}{why}"),
+        )
+    }
+}
+
+/// Whether the app took the request: `None` when it answered that it did, why its reply
+/// was lost when that is unknown, and `upstream_error` when it refused `what`.
+fn taken(dispatched: Dispatched<bool>, what: &str) -> Result<Option<String>, ToolError> {
+    match dispatched {
+        Dispatched::Answered(true) => Ok(None),
+        Dispatched::Answered(false) => Err(refused_by_app(what)),
+        Dispatched::Lost(why) => Ok(Some(why)),
     }
 }
 

@@ -48,6 +48,9 @@ const GONE: [&str; 4] = [
     "org.freedesktop.DBus.Error.UnknownMethod",
 ];
 
+/// What the bus answers in place of a reply when the application left without sending one.
+const NO_REPLY: &str = "org.freedesktop.DBus.Error.NoReply";
+
 /// Whether this session has an accessibility bus, decided once at startup.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub(crate) struct Presence {
@@ -183,6 +186,16 @@ impl From<Failed> for ToolError {
     }
 }
 
+/// What became of a call that acts on the application.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Dispatched<T> {
+    /// The application answered.
+    Answered(T),
+    /// The call may have gone out, and its reply was lost or couldn't be read: the
+    /// application may have acted. Why, without anything the application wrote.
+    Lost(String),
+}
+
 /// An application on the bus: its unique name and process ID.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct App {
@@ -235,6 +248,63 @@ impl Request {
             .body()
             .deserialize::<R>()
             .map_err(|error| Failed::Error(self.upstream(&what, &error)))
+    }
+
+    /// Calls `member`, which acts on the application, once. Nothing goes out when the
+    /// budget is spent or the connection is closed already. Once the call may have gone
+    /// out, no reply within the deadline, a lost connection, the bus's `NoReply` and a reply
+    /// that can't be read are `Lost`, since the application may have acted; an error the
+    /// application answered is its answer, as `Failed`.
+    async fn dispatch<B, R>(
+        &self,
+        target: (&str, &str),
+        member: (&str, &str),
+        body: &B,
+    ) -> Result<Dispatched<R>, Failed>
+    where
+        B: Serialize + DynamicType + Sync,
+        R: DeserializeOwned + zbus::zvariant::Type,
+    {
+        let (destination, path) = target;
+        let (interface, method) = member;
+        let what = format!("{interface}.{method} on {destination}");
+        let left = self.deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(Failed::Error(late(&what, left)));
+        }
+        if self.connection.is_closed() {
+            *self.shared.lock().await = None;
+            return Err(Failed::Error(ToolError::new(
+                ErrorName::UpstreamError,
+                format!("{what}: the connection to the accessibility bus closed; nothing was sent"),
+            )));
+        }
+        let lost = |why: String| {
+            Ok(Dispatched::Lost(format!(
+                "{why}; the call went out, so the app may have acted"
+            )))
+        };
+        let call =
+            self.connection
+                .call_method(Some(destination), path, Some(interface), method, body);
+        let reply = match tokio::time::timeout(left.min(CALL), call).await {
+            Ok(Ok(reply)) => reply,
+            Err(_) => return lost(late(&what, left).detail),
+            Ok(Err(zbus::Error::MethodError(name, _, _))) if name.as_str() == NO_REPLY => {
+                return lost(format!("{what}: {NO_REPLY}"));
+            }
+            Ok(Err(error @ zbus::Error::MethodError(..))) => {
+                return Err(self.failed(&what, error).await);
+            }
+            Ok(Err(error)) => {
+                *self.shared.lock().await = None;
+                return lost(self.upstream(&what, &error).detail);
+            }
+        };
+        reply.body().deserialize::<R>().map_or_else(
+            |_| lost(format!("{what}: its reply couldn't be read")),
+            |answer| Ok(Dispatched::Answered(answer)),
+        )
     }
 
     async fn failed(&self, what: &str, error: zbus::Error) -> Failed {
@@ -482,14 +552,22 @@ impl Request {
 
     /// Asks the application to do the element's action at `index`. The answer only says
     /// whether it took the request: the app does the action afterwards, on its own time.
-    pub(crate) async fn do_action(&self, element: &ElementRef, index: i32) -> Result<bool, Failed> {
-        self.call(element.at(), (ACTION, "DoAction"), &(index,))
+    pub(crate) async fn do_action(
+        &self,
+        element: &ElementRef,
+        index: i32,
+    ) -> Result<Dispatched<bool>, Failed> {
+        self.dispatch(element.at(), (ACTION, "DoAction"), &(index,))
             .await
     }
 
     /// Replaces the element's whole text with `text`.
-    pub(crate) async fn set_text(&self, element: &ElementRef, text: &str) -> Result<bool, Failed> {
-        self.call(element.at(), (EDITABLE_TEXT, "SetTextContents"), &(text,))
+    pub(crate) async fn set_text(
+        &self,
+        element: &ElementRef,
+        text: &str,
+    ) -> Result<Dispatched<bool>, Failed> {
+        self.dispatch(element.at(), (EDITABLE_TEXT, "SetTextContents"), &(text,))
             .await
     }
 

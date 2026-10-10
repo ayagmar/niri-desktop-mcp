@@ -88,7 +88,8 @@ An app's answer only says it took the request, so 300 ms later the server looks 
 
 - `present`: the element is still there; `element.states_set` and `element.states_cleared` name the states that changed, such as `checked`;
 - `gone`: the element or its window went away, as when a button closes its dialog;
-- `unknown`: it couldn't be read, with the reason in `detail`, and a screenshot comes with the result.
+- `unknown`: it couldn't be read, with the reason in `detail`, and a screenshot comes with the result;
+- `uncertain`, with `accepted: null`: the action went out but its reply was lost, as when the app hung or left, so it may have happened. `detail` says what the look afterwards saw, and a screenshot comes with the result. Don't repeat it; look first.
 
 `element.action` is the action taken, as `kind` (`click`, `press`, `activate` or `toggle` for those names in any case, `other` for any other) and `index` among the element's `actions`. The server never repeats an action's name, which the app chose: an action name the element didn't list, or no default action, is an argument mistake that counts the element's actions and names their kinds. An app that declines answers `upstream_error`.
 
@@ -101,7 +102,7 @@ An app's answer only says it took the request, so 300 ms later the server looks 
 | `expect` (required) | the element's window |
 | `screenshot` | with `true`, a screenshot taken once the screen stopped changing |
 
-The field's whole text is replaced with no key events, so the app's autocompletion and Enter don't happen; use `type_text` for those. Afterwards the server asks the field how many characters it holds: `observed` is `matched` when that equals the text's, `differs` when it doesn't, with the count as `element.characters`, as when an app filters what it is given or caps its length (a GTK entry keeps at most 65534 bytes), and `unknown` when it couldn't be read. A password field, an element with the role `password_text`, is refused with `secret_field`, and text over 64 KiB with `text_too_long`. An element without editable text is an argument mistake.
+The field's whole text is replaced with no key events, so the app's autocompletion and Enter don't happen; use `type_text` for those. Afterwards the server asks the field how many characters it holds: `observed` is `matched` when that equals the text's, `differs` when it doesn't, with the count as `element.characters`, as when an app filters what it is given or caps its length (a GTK entry keeps at most 65534 bytes), and `unknown` when it couldn't be read. As for `activate_element`, a reply lost after the text went out is `uncertain` with `accepted: null`. A password field, an element with the role `password_text`, is refused with `secret_field`, and text over 64 KiB with `text_too_long`. An element without editable text is an argument mistake.
 
 ## Which apps work
 

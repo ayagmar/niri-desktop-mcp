@@ -1135,8 +1135,10 @@ impl Server {
     /// only means it took the request, so the element is looked at again a moment later:
     /// `observed` is `present` (with `element.states_set` and `states_cleared`), `gone`
     /// (it or its window went away, as when a button closes its dialog) or `unknown`
-    /// (`detail` says why). An app that declines gives `upstream_error`. Take a screenshot
-    /// to see the effect; never repeat an activation on your own. Requires the lease.
+    /// (`detail` says why). An app that declines gives `upstream_error`. When the call went
+    /// out and its reply was lost, `accepted` is null and `observed` `uncertain`, with a
+    /// screenshot: it may have happened. Take a screenshot to see the effect; never repeat
+    /// an activation on your own. Requires the lease.
     #[tool(annotations(
         read_only_hint = false,
         destructive_hint = true,
@@ -1181,7 +1183,8 @@ impl Server {
     /// `text_too_long`, and an element without editable text is an argument mistake.
     /// `observed` is `matched` when the field then holds as many characters as were set,
     /// `differs` when it holds another number (`element.characters`), as an app that
-    /// filters input does, or `unknown`. The text is never logged or returned. Requires
+    /// filters input does, or `unknown`; `uncertain`, with `accepted` null, when the reply
+    /// was lost after the text went out. The text is never logged or returned. Requires
     /// the lease.
     #[tool(annotations(
         read_only_hint = false,

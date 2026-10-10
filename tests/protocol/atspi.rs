@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt as _, BufReader};
 use tokio::process::{Child, Command};
@@ -110,6 +111,8 @@ impl Object {
 enum Next {
     /// Its reply waits until the test releases it.
     Hold(Arc<Notify>, oneshot::Receiver<()>),
+    /// Its reply comes this much later.
+    Delay(Duration),
     /// `org.freedesktop.DBus.Error.Failed` with this message.
     Fail(String),
 }
@@ -156,6 +159,11 @@ impl Mock {
         Held { arrived, release }
     }
 
+    /// Answers the next call of `member` after `delay`.
+    pub(crate) fn delay(&self, member: &'static str, delay: Duration) {
+        self.set_next(member, Next::Delay(delay));
+    }
+
     /// Fails the next call of `member` with `message`.
     pub(crate) fn fail(&self, member: &'static str, message: &str) {
         self.set_next(member, Next::Fail(message.to_owned()));
@@ -199,6 +207,7 @@ impl Mock {
                 arrived.notify_one();
                 released.await.ok();
             }
+            Some(Next::Delay(delay)) => tokio::time::sleep(delay).await,
             Some(Next::Fail(message)) => return Err(fdo::Error::Failed(message)),
         }
         Ok(())
@@ -217,9 +226,16 @@ impl Mock {
 /// The daemon and the mock's connections. Dropping it kills the daemon.
 #[derive(Debug)]
 pub(crate) struct Bus {
-    _daemon: Child,
+    daemon: Child,
     _registry: Connection,
     _app: Connection,
+}
+
+impl Bus {
+    /// Kills the daemon, which ends every connection to it.
+    pub(crate) async fn kill(&mut self) {
+        self.daemon.kill().await.unwrap();
+    }
 }
 
 /// Starts a daemon in the fixture's directory, makes it the server's session bus, and puts
@@ -266,7 +282,7 @@ pub(crate) async fn start(
         .unwrap();
     registry.request_name("org.a11y.Bus").await.unwrap();
     let bus = Bus {
-        _daemon: daemon,
+        daemon,
         _registry: registry,
         _app: app,
     };
