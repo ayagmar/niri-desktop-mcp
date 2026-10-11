@@ -88,4 +88,4 @@ Runs at `9ff91c2`, the last code commit, each with C1's host snapshot unchanged,
 | `make nested-a11y SSD=1` | 1791676941-3048006 | pass |
 | `make nested-a11y SSD=1 SHARED=1` | 1791677003-3208484 | pass |
 
-Activations took 314–329 ms median per call, as before the fixes; the last gate adds a readiness report, one AT-SPI read and a few file reads. An earlier run, 1791676674-2387079, passed every M9 and M9b check but failed the host journal check: three `sudo` entries from the terminal's own cgroup, which the harness runs in and which no nested process wrote; the check fails on anything in that cgroup by design.
+Activations took a median of 316–329 ms per call, as before the fixes; the last gate adds a readiness report, one AT-SPI read and a few file reads. An earlier run, 1791676674-2387079, passed every M9 and M9b check but failed the host journal check: three `sudo` entries from the terminal's own cgroup, which the harness runs in and which no nested process wrote; the check fails on anything in that cgroup by design.
