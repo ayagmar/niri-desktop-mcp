@@ -756,6 +756,55 @@ async fn an_action_list_changed_before_the_last_gate_never_sends_another_action(
     }
 }
 
+/// The calls that read the element.
+const READS: [&str; 4] = ["GetState", "GetRole", "CharacterCount", "GetActions"];
+
+// A stop or a lease change once the call that acts went out can't recall it: the action is
+// `uncertain`, with why, and nothing more is asked, not even a screenshot. Before it went
+// out, the same changes refuse it (the tests above).
+#[tokio::test]
+async fn a_stop_or_lost_lease_after_the_call_went_out_leaves_it_uncertain() {
+    for held in [&ACTIVATE, &SET_TEXT] {
+        for (change, why) in [
+            (Change::Stopped, "the user's stop flag cancelled the action"),
+            (
+                Change::LeaseReplaced,
+                "the lease file was removed or replaced",
+            ),
+        ] {
+            let (name, path) = held.element;
+            let mut desk = Desk::start(&format!("el-cut-{}-{}", held.tag(), change as u8)).await;
+            let element = desk.element(name).await;
+            let acting = desk.mock.hold_on(held.acts, path);
+            let id = desk
+                .server
+                .start_call(held.tool, held.arguments(&element))
+                .await;
+            acting.arrived().await;
+            let mock = desk.mock.clone();
+            let reads = || READS.map(|read| mock.calls(read));
+            let read_before = reads();
+            desk.make(change, path).await;
+            let result = desk.server.response(id).await["result"].clone();
+            assert_eq!(reads(), read_before, "{change:?}");
+            acting.release();
+            assert_eq!(result["isError"], false, "{result}");
+            assert_eq!(result["content"].as_array().unwrap().len(), 1, "{result}");
+            let outcome = &result["structuredContent"];
+            assert_eq!(outcome["accepted"], Value::Null, "{outcome}");
+            assert_eq!(outcome["observed"], "uncertain", "{outcome}");
+            let detail = outcome["detail"].as_str().unwrap();
+            assert!(detail.contains(why), "{detail}");
+            assert!(detail.contains("may have taken effect"), "{detail}");
+            assert_eq!(desk.mock.calls(held.acts), 1);
+            let line = desk.fixture.audit_lines().pop().unwrap();
+            assert_eq!(line["tool"], held.tool);
+            assert_eq!(line["accepted"], Value::Null, "{line}");
+            assert_eq!(line["observed"], "uncertain", "{line}");
+        }
+    }
+}
+
 #[tokio::test]
 async fn a_password_field_is_never_activated() {
     let mut desk = Desk::start("el-password-activate").await;

@@ -176,6 +176,9 @@ pub(crate) trait Recheck: Sync {
     fn control(&self) -> impl Future<Output = Result<(), ToolError>> + Send;
     /// The desk's: the stop flag, the input-dirty marker and the lease.
     fn desk(&self) -> Result<(), ToolError>;
+    /// Tells the desk the call that acts is going out, so a stop or a moved lease from now
+    /// on leaves the action `uncertain` instead of refused.
+    fn sending(&self);
 }
 
 /// What an element action's last gate checks: `expect`, the policy's deny list, and the
@@ -273,6 +276,7 @@ pub(crate) async fn activate(
             offered(&request, element, action),
         )
         .await?;
+    gate.recheck.sending();
     let dispatched = request
         .do_action(element, checked.read)
         .await
@@ -364,6 +368,7 @@ pub(crate) async fn set_text(
             "the element isn't in the `editable` state, so its text can't be set".to_owned(),
         ));
     }
+    gate.recheck.sending();
     let dispatched = request
         .set_text(element, text)
         .await

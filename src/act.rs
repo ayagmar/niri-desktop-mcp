@@ -12,6 +12,7 @@ use std::time::Duration;
 use niri_ipc::{Action, Window, WorkspaceReferenceArg};
 use serde::Serialize;
 
+use crate::control::desk::Worked;
 use crate::elements::actions::Acted;
 use crate::error::{CallError, ErrorName, ToolError, Unanswered};
 use crate::input::keyboard::Focus;
@@ -181,6 +182,15 @@ impl Outcome {
             detail: Some(detail),
             screenshot: None,
             screenshot_error: None,
+        }
+    }
+
+    /// The outcome of work the desk ran: its own, or `uncertain` with `accepted: null` and
+    /// why, when a stop or a moved lease cut it short after its call went out.
+    pub(crate) fn concluded(worked: Worked<Self>) -> Self {
+        match worked {
+            Worked::Done(outcome) => outcome,
+            Worked::CutAfterSending(cut) => Self::uncertain(None, None, cut.detail),
         }
     }
 

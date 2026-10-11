@@ -17,7 +17,7 @@ Looking needs nothing: any connected agent can call `status`, `desktop_state`, `
 
 Bind `niri-computer-use stop` to a key in your niri config (see [First session](../../start/first-session/#bind-the-stop-key)). Pressing it:
 
-- cancels the action that is running, which ends with `stopped`; anything niri had already accepted may have taken effect
+- cancels the action that is running, which ends with `stopped`; anything niri had already accepted may have taken effect. An element action whose call to the app had already gone out ends as `uncertain` with `accepted: null` instead, since the app may have acted
 - takes the lease back from the agent, once a screenshot or readiness check under way has finished
 - refuses every later `acquire_desktop` and action with `stopped`
 

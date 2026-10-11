@@ -19,7 +19,7 @@ use crate::a11y::model::NameHash;
 use crate::a11y::{self, A11y, Presence};
 use crate::act::{self, Outcome};
 use crate::audit::Audit;
-use crate::control::desk::Desk;
+use crate::control::desk::{Desk, Worked};
 use crate::control::lease::Holder;
 use crate::error::{CallError, ErrorName, ToolError};
 use crate::input::Input;
@@ -72,6 +72,10 @@ impl elements::actions::Recheck for Recheck<'_> {
 
     fn desk(&self) -> Result<(), ToolError> {
         self.engine.desk.checkpoint(self.session)
+    }
+
+    fn sending(&self) {
+        self.engine.desk.sending();
     }
 }
 
@@ -317,7 +321,7 @@ impl Engine {
         // Boxed, because the readiness report, the action's work and its wait make large
         // futures.
         let refusal = Box::pin(self.refusal(session));
-        let evidence = |outcome| Box::pin(self.evidence(session, outcome, shoot));
+        let evidence = |worked| Box::pin(self.evidence(session, worked, shoot));
         self.desk
             .act(session, refusal, Box::pin(work), evidence)
             .await
@@ -420,7 +424,8 @@ impl Engine {
     async fn restore(&self, session: &Session, id: u64) -> Value {
         let refusal = Box::pin(self.refusal(session));
         let work = Box::pin(act::refocus(self.niri(), id));
-        let acted = self.desk.act(session, refusal, work, std::future::ready);
+        let concluded = |worked| std::future::ready(Outcome::concluded(worked));
+        let acted = self.desk.act(session, refusal, work, concluded);
         let restored = match acted.await {
             Ok(outcome) => serde_json::to_value(outcome),
             Err(CallError::Tool(error)) => serde_json::to_value(error),
@@ -477,7 +482,20 @@ impl Engine {
     }
 
     /// The outcome with the screenshot `shoot` asks for, or the one an outcome in doubt gets.
-    async fn evidence(&self, session: &Session, outcome: Outcome, shoot: bool) -> act::Evidenced {
+    /// The outcome with its evidence, or, for work cut short after its call went out, the
+    /// outcome alone: after a stop or with the lease gone, nothing more is asked.
+    async fn evidence(
+        &self,
+        session: &Session,
+        worked: Worked<Outcome>,
+        shoot: bool,
+    ) -> act::Evidenced {
+        let Worked::Done(outcome) = worked else {
+            return act::Evidenced {
+                outcome: Outcome::concluded(worked),
+                image: None,
+            };
+        };
         act::with_evidence(outcome, shoot, |request| self.capture(session, request)).await
     }
 }

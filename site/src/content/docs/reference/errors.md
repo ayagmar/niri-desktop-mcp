@@ -15,7 +15,7 @@ An agent should stop and tell you when it gets one of these. Calling the action 
 
 ### `stopped`
 
-**Cause:** the stop flag is set for this niri instance, by the stop key or `niri-computer-use stop`. A stop during an action cancels it with this error; anything niri had already accepted may have taken effect. A runtime directory that can't be read also counts as stopped.
+**Cause:** the stop flag is set for this niri instance, by the stop key or `niri-computer-use stop`. A stop during an action cancels it with this error; anything niri had already accepted may have taken effect. An `activate_element` or `set_element_text` whose call to the app had already gone out isn't an error: it ends `uncertain`, with `accepted: null` and the stop in `detail`. A runtime directory that can't be read also counts as stopped.
 
 **What to do:** when you want agents to act again, run `niri-computer-use resume`. If `status` shows `input_dirty`, run `niri-computer-use recover` first.
 

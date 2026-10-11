@@ -7,6 +7,7 @@
 //! lease up at once: its running action is dropped in whatever phase it is.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, Weak};
 use std::time::Duration;
 
@@ -50,6 +51,9 @@ struct Seat {
     /// The refs of the lease held, which a screenshot adds to without waiting for a running
     /// action. Started and ended together with `lease`.
     refs: std::sync::Mutex<Refs>,
+    /// Whether the running action's one call that acts may have gone out
+    /// (`Desk::sending`). Cleared when an action starts, under the action mutex.
+    sending: AtomicBool,
 }
 
 /// The lease, held for one session.
@@ -149,6 +153,7 @@ impl Desk {
             lease: Mutex::new(None),
             owner: watch::Sender::new(None),
             refs: std::sync::Mutex::new(Refs::default()),
+            sending: AtomicBool::new(false),
         });
         let runtime = RuntimeDir::of(env).map_err(|detail| {
             let name = if env.instance.socket().is_err() {
@@ -238,14 +243,16 @@ impl Desk {
     /// while `work` runs cancels it; the stop watcher then takes the lease back. A lease
     /// file removed or replaced meanwhile cancels it too, and the lease is given up at once.
     /// `finish` turns the work's result into the call's, still under the mutex but past the
-    /// stop, so a stop can't discard what the work already found. The session ending drops
-    /// the action in any phase: waiting for the mutex, `refusal`, `work` or `finish`.
+    /// stop, so a stop can't discard what the work already found. A stop or a moved lease
+    /// that cancels the work after it called `sending` is no refusal either: `finish` gets
+    /// `Worked::CutAfterSending`, since the call may have taken effect. The session ending
+    /// drops the action in any phase: waiting for the mutex, `refusal`, `work` or `finish`.
     pub(crate) async fn act<T, U, F>(
         &self,
         session: &Session,
         refusal: impl Future<Output = Option<ToolError>>,
         work: impl Future<Output = Result<T, CallError>>,
-        finish: impl FnOnce(T) -> F,
+        finish: impl FnOnce(Worked<T>) -> F,
     ) -> Result<U, CallError>
     where
         F: Future<Output = U>,
@@ -269,7 +276,7 @@ impl Desk {
         session: &Session,
         refusal: impl Future<Output = Option<ToolError>>,
         work: impl Future<Output = Result<T, CallError>>,
-        finish: impl FnOnce(T) -> F,
+        finish: impl FnOnce(Worked<T>) -> F,
     ) -> Result<U, CallError>
     where
         F: Future<Output = U>,
@@ -283,6 +290,7 @@ impl Desk {
         if let Some(refusal) = refusal.await {
             return Err(refusal.into());
         }
+        self.seat.sending.store(false, Ordering::Relaxed);
         let ended = if grant.lease.intact() {
             tokio::select! {
                 biased;
@@ -293,21 +301,36 @@ impl Desk {
         } else {
             Ended::Moved("sent nothing")
         };
-        let done = match ended {
-            Ended::Done(done) => done,
-            Ended::Stopped => return Err(cancelled(&stopped).into()),
+        let sending = self.seat.sending.load(Ordering::Relaxed);
+        let cut = match ended {
+            Ended::Done(done) => {
+                let finished = finish(Worked::Done(done?)).await;
+                drop(held);
+                return Ok(finished);
+            }
+            Ended::Stopped => cancelled(&stopped, sending),
             Ended::Moved(what) => {
                 self.seat.take(&mut held);
+                let what = if sending { AFTER_SENDING } else { what };
                 // Without the directory, the stop watcher is about to end too.
-                if !runtime.path().exists() {
-                    return Err(watcher_ended().into());
+                if runtime.path().exists() {
+                    lease_moved(what)
+                } else {
+                    watcher_ended()
                 }
-                return Err(lease_moved(what).into());
             }
         };
-        let finished = finish(done?).await;
-        drop(held);
-        Ok(finished)
+        if !sending {
+            return Err(cut.into());
+        }
+        Ok(finish(Worked::CutAfterSending(cut)).await)
+    }
+
+    /// Says the running action's one call that acts is going out, so a stop or a moved
+    /// lease that cancels the action from now on reports it as uncertain rather than
+    /// refused. Only the action holding the action mutex calls it, from its work.
+    pub(crate) fn sending(&self) {
+        self.seat.sending.store(true, Ordering::Relaxed);
     }
 
     /// The desk's checks before an action, asked again while `session`'s action runs, as an
@@ -519,6 +542,15 @@ async fn release_loop(mut stopped: watch::Receiver<bool>, seat: Weak<Seat>) {
     }
 }
 
+/// What an action's work came to, for `finish` to make the call's result of.
+#[derive(Debug)]
+pub(crate) enum Worked<T> {
+    Done(T),
+    /// A stop or the lease moving cancelled the work after it said its one call that acts
+    /// was going out (`Desk::sending`), so that call may have taken effect: why.
+    CutAfterSending(ToolError),
+}
+
 /// How an action's work ended.
 enum Ended<T> {
     Done(T),
@@ -589,15 +621,20 @@ fn lease_required() -> ToolError {
 /// Why a running action was cancelled. A watcher that loses the runtime directory reports
 /// a stop and then ends, which on this single-threaded runtime happens before the action's
 /// task runs again.
-fn cancelled(stopped: &watch::Receiver<bool>) -> ToolError {
+fn cancelled(stopped: &watch::Receiver<bool>, sending: bool) -> ToolError {
     if stopped.has_changed().is_err() {
         return watcher_ended();
     }
-    ToolError::new(
-        ErrorName::Stopped,
-        "the user's stop flag cancelled this action; anything niri had already accepted may have taken effect",
-    )
+    let what = if sending {
+        AFTER_SENDING
+    } else {
+        "cancelled this action; anything niri had already accepted may have taken effect"
+    };
+    ToolError::new(ErrorName::Stopped, format!("the user's stop flag {what}"))
 }
+
+/// What a stop or a moved lease did to an action whose call that acts had gone out.
+const AFTER_SENDING: &str = "cancelled the action after its call that acts went out, so that call may have taken effect; nothing more was asked";
 
 /// The refusal while the input-dirty marker is set. A marker whose input this server still
 /// holds belongs to a dropped call's input that is still finishing, which `recover` would
@@ -785,10 +822,18 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// `finish` for work that is never cut short after sending: its own result.
+    fn done<T>(worked: Worked<T>) -> std::future::Ready<T> {
+        match worked {
+            Worked::Done(done) => ready(done),
+            Worked::CutAfterSending(cut) => panic!("{cut:?}"),
+        }
+    }
+
     /// An action whose work records that it ran and returns `value`.
     async fn act(desk: &Desk, refusal: Option<ToolError>) -> Result<u8, ErrorName> {
         let me = session(1);
-        desk.act(&me, async { refusal }, async { Ok(7) }, ready)
+        desk.act(&me, async { refusal }, async { Ok(7) }, done)
             .await
             .map_err(|error| match error {
                 CallError::Tool(error) => error.name,
@@ -912,7 +957,7 @@ mod tests {
                 let _held = held;
                 std::future::pending::<Result<(), CallError>>().await
             },
-            ready,
+            done,
         );
         let stop = async {
             running.await.unwrap();
@@ -969,7 +1014,7 @@ mod tests {
                     ran = true;
                     Ok(())
                 },
-                ready,
+                done,
             )
             .await;
         let Err(CallError::Tool(error)) = result else {
@@ -1002,7 +1047,7 @@ mod tests {
                 let _held = held;
                 std::future::pending::<Result<(), CallError>>().await
             },
-            ready,
+            done,
         );
         let replace = async {
             running.await.unwrap();
@@ -1019,6 +1064,83 @@ mod tests {
         assert_eq!(error.name, ErrorName::LeaseRequired);
         assert!(dropped.await.is_err());
         assert!(!desk.status(&me).held_by_me);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Runs an action whose work says its call is going out when `sends`, then waits,
+    /// while `cut` stops it or moves the lease. Returns how it ended.
+    async fn cut_short(
+        desk: &Desk,
+        sends: bool,
+        cut: impl Future<Output = ()>,
+    ) -> Result<Worked<()>, CallError> {
+        let me = session(1);
+        let (started, running) = tokio::sync::oneshot::channel::<()>();
+        let action = desk.act(
+            &me,
+            async { None },
+            async move {
+                if sends {
+                    desk.sending();
+                }
+                started.send(()).unwrap();
+                std::future::pending::<Result<(), CallError>>().await
+            },
+            ready,
+        );
+        let cut = async {
+            running.await.unwrap();
+            cut.await;
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(action, cut) })
+                .await
+                .unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn a_stop_or_a_moved_lease_after_sending_is_no_refusal_and_still_ends_the_lease() {
+        let me = session(1);
+        let dir = crate::test_support::fresh_dir("desk-act-sent");
+        let desk = Desk::start(&env(&dir));
+        let other = Desk::start(&env(&dir));
+        let runtime = RuntimeDir::of(&env(&dir)).unwrap();
+        let take = async || {
+            other.release(&me).await;
+            desk.acquire(&me, "me/1", ready(None), ready(None))
+                .await
+                .unwrap();
+        };
+        take().await;
+        // An action that sent and finished leaves nothing for the next one.
+        let sends = async {
+            desk.sending();
+            Ok(())
+        };
+        desk.act(&me, async { None }, sends, done).await.unwrap();
+        let unsent = cut_short(&desk, false, replace_lease(&runtime, &other)).await;
+        assert!(
+            matches!(&unsent, Err(CallError::Tool(error)) if error.name == ErrorName::LeaseRequired),
+            "{unsent:?}"
+        );
+        take().await;
+        let replaced = cut_short(&desk, true, replace_lease(&runtime, &other)).await;
+        let Ok(Worked::CutAfterSending(moved)) = replaced else {
+            panic!("{replaced:?}");
+        };
+        assert_eq!(moved.name, ErrorName::LeaseRequired);
+        assert!(moved.detail.contains("may have taken effect"), "{moved:?}");
+        assert!(!desk.status(&me).held_by_me);
+        take().await;
+        let stop = async { runtime.stop().unwrap() };
+        let stopped = cut_short(&desk, true, stop).await;
+        let Ok(Worked::CutAfterSending(error)) = stopped else {
+            panic!("{stopped:?}");
+        };
+        assert_eq!(error.name, ErrorName::Stopped);
+        assert!(error.detail.contains("may have taken effect"), "{error:?}");
+        assert!(released(&desk).await);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1039,7 +1161,7 @@ mod tests {
                 started.send(()).unwrap();
                 std::future::pending::<Result<(), CallError>>().await
             },
-            ready,
+            done,
         );
         let remove = async {
             running.await.unwrap();
@@ -1215,7 +1337,7 @@ mod tests {
 
     /// An action of `session` whose work returns 7.
     async fn act_as(desk: &Desk, session: &Session) -> Result<u8, ErrorName> {
-        desk.act(session, async { None }, async { Ok(7) }, ready)
+        desk.act(session, async { None }, async { Ok(7) }, done)
             .await
             .map_err(|error| match error {
                 CallError::Tool(error) => error.name,
@@ -1240,7 +1362,7 @@ mod tests {
                 started.send(()).unwrap();
                 std::future::pending::<Result<(), CallError>>().await
             },
-            ready,
+            done,
         );
         let others = async {
             running.await.unwrap();
@@ -1270,7 +1392,7 @@ mod tests {
                 started.send(()).unwrap();
                 std::future::pending::<Result<(), CallError>>().await
             },
-            ready,
+            done,
         );
         let others = async {
             running.await.unwrap();
@@ -1392,7 +1514,7 @@ mod tests {
                 started.send(()).unwrap();
                 std::future::pending::<Result<(), CallError>>().await
             },
-            ready,
+            done,
         );
         let others = async {
             running.await.unwrap();
@@ -1498,7 +1620,7 @@ mod tests {
             stall(Phase::Work).await;
             Ok(())
         };
-        let action = desk.act(me, refusal, work, |()| stall(Phase::Finish));
+        let action = desk.act(me, refusal, work, |_| stall(Phase::Finish));
         let end = async {
             started.notified().await;
             desk.end_session(me).await;
