@@ -6,7 +6,8 @@ every change, and each activation (Enter) with the text it submitted, then clear
 `Second` buttons, which count their activations in `primary-count` and `second-count`,
 the `Plain entry`, which reports its text in `a11y-entry-text`, the `Password entry` and
 `Pin entry` (an entry for a PIN that hides it), which count their changes in
-`password-changes` and `pin-changes` without their text, a `Vanish` button that
+`password-changes` and `pin-changes` without their text, the `Hidden entry`, which
+only hides its synthetic text, as a free-form entry can, a `Vanish` button that
 removes itself when clicked, a `Dismiss` button that closes the window, and a `Rename`
 button that changes the window's Wayland app_id to `org.ncu.Denied`.
 """
@@ -129,6 +130,8 @@ def a11y_window(window):
         secret.connect("changed", secret_changed, key)
         grid.attach(secret, column, 3, 1, 1)
         report(f"{key}-changes", "0")
+    hidden = labelled(Gtk.Entry(visibility=False, text="ncu hidden"), "Hidden entry")
+    grid.attach(hidden, 0, 5, 2, 1)
     vanish = Gtk.Button(label="Vanish")
     vanish.connect("clicked", lambda button: grid.remove(button))
     grid.attach(vanish, 1, 2, 1, 1)

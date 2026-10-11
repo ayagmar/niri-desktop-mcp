@@ -27,7 +27,7 @@ Each `nested-a11y` run passed these checks, for GTK 4, GTK 3 and Qt Quick, with 
 
 - 20 activations of the counted button, each counted exactly once and observed `present`. All 20 were already counted when each call returned.
 - The plain entry's text set and read back whole by the fixture, `matched`.
-- Every password field refused with `secret_field`, its change counter at 0.
+- Every field marked as a password field (role `password_text`) refused with `secret_field`, its change counter at 0.
 - `focus_mismatch` with a decoy window focused, `stopped` with the stop flag set, and `lease_required` after a release, each leaving the counter unchanged for half a second.
 - `Dismiss` observed `gone`, then the window's other ref `element_stale`.
 - GTK 4: 64 KiB set and `differs` with 65534 characters kept, a byte more `text_too_long`; `Rename` to a denied `app_id`, then `app_denied`, counter at 0.
@@ -58,7 +58,22 @@ By the server's audit log in runs 1791665383-3224458 and 1791665432-3336754: an 
 ## Not covered here
 
 - Real applications on the user's accessibility bus.
-- A GTK 4 entry that hides its text with a free-form input purpose: it is a plain `text` on the bus and isn't refused. No fixture checks it.
+- A GTK 4 entry that hides its text with a free-form input purpose isn't refused: it is a plain `text` on the bus. The fixes below record what it exposes.
 - The deny list on GTK 3 and Qt windows: GTK 3 has no `GdkWayland` typelib here and Qt no per-window `app_id`, so only GTK 4 changes its `app_id`.
 - `CharacterCount` for text outside the Basic Multilingual Plane, where a toolkit may count UTF-16 units: the synthetic text is ASCII.
 - A layer-shell surface over the element: the focus check refuses an element while a panel holds keyboard focus, but nothing checks what is drawn on top.
+
+## After review
+
+A blind review found six problems; the follow-up commits fix them (see `docs/decisions.md`, "element actions after review"). What GTK 4 exposes for an entry that only hides its text, from `make nested-a11y` run 1791676674-2387079, read with `busctl` on the nested bus:
+
+| | `Hidden entry` | `Plain entry` |
+|---|---|---|
+| Role | `text` (61) | `text` (61) |
+| States | `[1124075648, 1024]` | `[1124075648, 1024]` |
+| Interfaces | Accessible, Component, Text, EditableText, Action | the same |
+| `GetAttributes` | `toolkit: GTK` | `toolkit: GTK` |
+| `Text.GetDefaultAttributes` | `invisible: false` among 21 others | the same |
+| `Text.GetText` | `●●●●●●●●●●` for the synthetic `ncu hidden` | empty |
+
+Only the text tells them apart, and only while the field holds some. It isn't refused, and `secret_field` is documented as covering fields marked as passwords.

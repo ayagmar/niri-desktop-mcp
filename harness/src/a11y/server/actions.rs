@@ -79,6 +79,9 @@ impl Checks<'_, '_> {
         self.counted(files.count, 0)?;
         self.call("focus_window", json!({"id": window}))?;
         self.describe(toolkit, window)?;
+        if toolkit == Toolkit::Gtk4 {
+            crate::a11y::hidden::record(self.session, bus, fixture.pid())?;
+        }
         let button = self.named(window, Some("button"), files.button)?;
         self.activated(toolkit, window, &button, files.count)?;
         self.set_text(toolkit, window, files.entry)?;

@@ -12,6 +12,7 @@ use std::time::Duration;
 use niri_ipc::{Request, Response, Window};
 use serde_json::Value;
 
+mod hidden;
 mod server;
 
 use crate::config::Decorations;
