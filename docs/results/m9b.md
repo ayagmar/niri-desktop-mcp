@@ -65,7 +65,7 @@ By the server's audit log in runs 1791665383-3224458 and 1791665432-3336754: an 
 
 ## After review
 
-A blind review found six problems; the follow-up commits fix them (see `docs/decisions.md`, "element actions after review"). What GTK 4 exposes for an entry that only hides its text, from `make nested-a11y` run 1791676674-2387079, read with `busctl` on the nested bus:
+A blind review found six problems; the follow-up commits fix them (see `docs/decisions.md`, "element actions after review"). What GTK 4 exposes for an entry that only hides its text, from `make nested-a11y` run 1791676844-2805663 (the same in the other three), read with `busctl` on the nested bus:
 
 | | `Hidden entry` | `Plain entry` |
 |---|---|---|
@@ -77,3 +77,15 @@ A blind review found six problems; the follow-up commits fix them (see `docs/dec
 | `Text.GetText` | `●●●●●●●●●●` for the synthetic `ncu hidden` | empty |
 
 Only the text tells them apart, and only while the field holds some. It isn't refused, and `secret_field` is documented as covering fields marked as passwords.
+
+Runs at `9ff91c2`, the last code commit, each with C1's host snapshot unchanged, no host journal entries from the run and no leftover processes:
+
+| Command | Run | Result |
+|---|---|---|
+| `make check` | before every commit | pass: 293 server, 126 harness and 188 protocol tests, one protocol test ignored |
+| `make nested-a11y` | 1791676844-2805663 | pass |
+| `make nested-a11y SHARED=1` | 1791676892-2923863 | pass |
+| `make nested-a11y SSD=1` | 1791676941-3048006 | pass |
+| `make nested-a11y SSD=1 SHARED=1` | 1791677003-3208484 | pass |
+
+Activations took 314–329 ms median per call, as before the fixes; the last gate adds a readiness report, one AT-SPI read and a few file reads. An earlier run, 1791676674-2387079, passed every M9 and M9b check but failed the host journal check: three `sudo` entries from the terminal's own cgroup, which the harness runs in and which no nested process wrote; the check fails on anything in that cgroup by design.
