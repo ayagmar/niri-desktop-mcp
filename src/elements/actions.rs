@@ -169,35 +169,44 @@ pub(crate) trait Recheck: Sync {
     fn desk(&self) -> Result<(), ToolError>;
 }
 
-/// What an element action's last gate checks: `expect`, and the action gate's checks.
+/// What an element action's last gate checks: `expect`, the policy's deny list, and the
+/// action gate's checks.
 pub(crate) struct Gate<'a, R> {
     pub(crate) expect: Expect,
+    pub(crate) policy: &'a Loaded,
     pub(crate) recheck: &'a R,
 }
 
-/// What the last gate saw.
-struct Checked {
+/// What the last gate saw, with what the tool's own read of the element found.
+struct Checked<T> {
+    read: T,
     role: u32,
     states: States,
     focus: Focus,
 }
 
 impl<R: Recheck> Gate<'_, R> {
-    /// The last checks before the call that acts, slowest first so the ones that change
-    /// fastest are read nearest the call: the action gate's own checks again; the
-    /// element's role and states; then niri's events received so far, failing if the
-    /// stream was lost, and the window's focus, deny list and `expect` on them; and the
-    /// desk last. A change after them, before the app takes the call, isn't seen: niri,
-    /// the desk and the app are asked apart, and nothing makes those reads one step.
-    async fn last(
+    /// The last checks before the call that acts. The app's answers come first, one call at
+    /// a time: the element is still the one listed, then `read`, the tool's own read of it,
+    /// then its states, then its role, so a field that became a password field meanwhile is
+    /// refused. Then ours, none of which waits on the app: the action gate's checks again,
+    /// niri's events received so far, failing if the stream was lost, the window's focus,
+    /// deny list and `expect` on them, and the desk last. An app that holds a reply back
+    /// only delays its own answers; it can't make ours stale. The app can still change the
+    /// element after answering, and anything can change between these checks and the app
+    /// taking the call: niri, the desk and the app are asked apart, and nothing makes those
+    /// reads one step.
+    async fn last<T>(
         &self,
-        policy: &Loaded,
         element: &ElementRef,
         request: &Request,
         waiter: &mut Waiter,
-    ) -> Result<Checked, CallError> {
-        self.recheck.control().await?;
+        read: impl Future<Output = Result<T, CallError>>,
+    ) -> Result<Checked<T>, CallError> {
+        identify(request, element, owner(waiter.view(), element)?).await?;
+        let read = read.await?;
         let (role, states) = current(request, element).await?;
+        self.recheck.control().await?;
         if let Waited::Lost(why) = waiter.until(Duration::ZERO, |_| None::<()>).await {
             return Err(ToolError::new(
                 ErrorName::NiriUnavailable,
@@ -205,9 +214,10 @@ impl<R: Recheck> Gate<'_, R> {
             )
             .into());
         }
-        let focus = owner_focused(policy, waiter.view(), element, &self.expect)?;
+        let focus = owner_focused(self.policy, waiter.view(), element, &self.expect)?;
         self.recheck.desk()?;
         Ok(Checked {
+            read,
             role,
             states,
             focus,
@@ -224,39 +234,32 @@ pub(crate) async fn activate(
     gate: Gate<'_, impl Recheck>,
 ) -> Result<Outcome, CallError> {
     let a11y = accessible(input)?;
-    let chosen =
+    let index =
         choose_action(&element.kept.actions, requested).map_err(CallError::InvalidArguments)?;
-    let name = element
-        .kept
-        .actions
-        .get(chosen)
-        .cloned()
-        .unwrap_or_default();
     let action = Chosen {
-        kind: ActionKind::of(&name),
-        index: chosen,
+        kind: element
+            .kept
+            .actions
+            .get(index)
+            .map_or(ActionKind::Other, |name| ActionKind::of(name)),
+        index,
     };
     let mut waiter = niri::waiter(input.niri.events).await?;
-    owner_focused(input.policy, waiter.view(), element, &gate.expect)?;
+    owner_focused(gate.policy, waiter.view(), element, &gate.expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
+    // The fast refusals, before the last gate asks all of it again.
     identify(&request, element, owner(waiter.view(), element)?).await?;
-    let actions = request.actions(element).await.map_err(gone_is_stale)?;
-    let index = actions
-        .iter()
-        .position(|offered| *offered == name)
-        .and_then(|index| i32::try_from(index).ok())
-        .ok_or_else(|| {
-            stale(&format!(
-                "the element no longer offers its {} action at index {}",
-                action.kind.name(),
-                action.index
-            ))
-        })?;
+    offered(&request, element, action).await?;
     let checked = gate
-        .last(input.policy, element, &request, &mut waiter)
+        .last(
+            element,
+            &request,
+            &mut waiter,
+            offered(&request, element, action),
+        )
         .await?;
     let dispatched = request
-        .do_action(element, index)
+        .do_action(element, checked.read)
         .await
         .map_err(gone_is_stale)?;
     let lost = taken(dispatched, &format!("its {} action", action.kind.name()))?;
@@ -288,6 +291,27 @@ pub(crate) async fn activate(
     ))
 }
 
+/// The index to ask the app for `action`: it must still be the element's action of that
+/// name at the index `elements` listed it at, so an action list that changed since can't
+/// make the index name another action.
+async fn offered(
+    request: &Request,
+    element: &ElementRef,
+    action: Chosen,
+) -> Result<i32, CallError> {
+    let actions = request.actions(element).await.map_err(gone_is_stale)?;
+    let listed = element.kept.actions.get(action.index);
+    match i32::try_from(action.index) {
+        Ok(index) if listed.is_some() && actions.get(action.index) == listed => Ok(index),
+        _ => Err(stale(&format!(
+            "the element no longer offers its {} action at index {}",
+            action.kind.name(),
+            action.index
+        ))
+        .into()),
+    }
+}
+
 /// Replaces the element's whole text with `text` and reads back how many characters it
 /// holds.
 pub(crate) async fn set_text(
@@ -299,20 +323,13 @@ pub(crate) async fn set_text(
     check_text(text)?;
     let a11y = accessible(input)?;
     let mut waiter = niri::waiter(input.niri.events).await?;
-    owner_focused(input.policy, waiter.view(), element, &gate.expect)?;
+    owner_focused(gate.policy, waiter.view(), element, &gate.expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
+    // The fast refusals, before the last gate asks all of it again.
     identify(&request, element, owner(waiter.view(), element)?).await?;
-    let editable = request
-        .editable_text(element)
-        .await
-        .map_err(gone_is_stale)?;
-    if !editable {
-        return Err(CallError::InvalidArguments(
-            "the element has no EditableText interface, so its text can't be set".to_owned(),
-        ));
-    }
+    editable(&request, element).await?;
     let checked = gate
-        .last(input.policy, element, &request, &mut waiter)
+        .last(element, &request, &mut waiter, editable(&request, element))
         .await?;
     if !checked.states.has(State::Editable) {
         return Err(CallError::InvalidArguments(
@@ -339,6 +356,20 @@ pub(crate) async fn set_text(
         waiter.view(),
         checked.focus,
         acted,
+    ))
+}
+
+/// Checks the element has an `EditableText` interface, or its text can't be set.
+async fn editable(request: &Request, element: &ElementRef) -> Result<(), CallError> {
+    if request
+        .editable_text(element)
+        .await
+        .map_err(gone_is_stale)?
+    {
+        return Ok(());
+    }
+    Err(CallError::InvalidArguments(
+        "the element has no EditableText interface, so its text can't be set".to_owned(),
     ))
 }
 
@@ -409,7 +440,7 @@ fn owner<'a>(view: &'a View, element: &ElementRef) -> Result<&'a Window, ToolErr
 }
 
 /// The element's role and states now, if it is still the element listed, not a password
-/// field, and showing.
+/// field, and showing. The role is read last.
 async fn current(request: &Request, element: &ElementRef) -> Result<(u32, States), ToolError> {
     let (role, states) = request.state(element).await.map_err(gone_is_stale)?;
     // Before the role is compared, so a field that became a password field says so.

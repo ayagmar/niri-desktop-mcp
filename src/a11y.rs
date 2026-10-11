@@ -542,14 +542,13 @@ impl Request {
         })
     }
 
-    /// The kept element's role and states now.
+    /// The kept element's role and states now: its states, then its role, one call after
+    /// the other, so the role is as late as the app answers.
     pub(crate) async fn state(&self, element: &ElementRef) -> Result<(u32, States), Failed> {
         let at = element.at();
-        let (role, states) = tokio::join!(
-            self.call::<_, u32>(at, (ACCESSIBLE, "GetRole"), &()),
-            self.call::<_, Vec<u32>>(at, (ACCESSIBLE, "GetState"), &()),
-        );
-        Ok((role?, States::from_words(&states?)))
+        let states: Vec<u32> = self.call(at, (ACCESSIBLE, "GetState"), &()).await?;
+        let role: u32 = self.call(at, (ACCESSIBLE, "GetRole"), &()).await?;
+        Ok((role, States::from_words(&states)))
     }
 
     /// The names of the element's actions now, in index order.

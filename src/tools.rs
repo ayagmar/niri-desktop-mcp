@@ -1167,6 +1167,7 @@ impl Server {
             let element = self.engine.element(&self.session, &args.element)?;
             let gate = actions::Gate {
                 expect: args.expect.into(),
+                policy: input.policy,
                 recheck: &self.engine.recheck(&self.session),
             };
             actions::activate(input, &element, args.action.as_deref(), gate).await
@@ -1214,6 +1215,7 @@ impl Server {
             let element = self.engine.element(&self.session, &args.element)?;
             let gate = actions::Gate {
                 expect: args.expect.into(),
+                policy: input.policy,
                 recheck: &self.engine.recheck(&self.session),
             };
             actions::set_text(input, &element, &args.text, gate).await

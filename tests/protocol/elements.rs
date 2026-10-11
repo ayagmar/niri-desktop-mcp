@@ -248,7 +248,7 @@ async fn an_apps_action_names_reach_neither_errors_nor_the_audit_log() {
     }
     let audit = std::fs::read_to_string(desk.fixture.audit_log()).unwrap();
     assert!(!audit.contains("SENTINEL"), "{audit}");
-    assert_eq!(desk.mock.calls("DoAction"), 3);
+    assert_eq!(desk.mock.done(), [0, 1, 0]);
 }
 
 /// An outcome whose reply was lost: `uncertain`, with nothing said accepted, a
@@ -360,24 +360,10 @@ async fn another_object_at_a_listed_elements_path_is_stale() {
 
 #[tokio::test]
 async fn an_element_moved_to_another_window_of_its_app_is_stale() {
-    let mut objects = objects();
-    objects.extend([
-        ("/frame2", Object::frame("Other", (640, 480), &["/panel2"])),
-        ("/panel2", Object::panel(&[])),
-    ]);
-    let mut other = app_window(3, false);
-    other["title"] = json!("Other");
-    other["layout"]["window_size"] = json!([640, 480]);
-    let windows = [app_window(WINDOW, true), other];
-    let mut desk = Desk::start_with("el-moved", &["/frame", "/frame2"], objects, &windows).await;
+    let mut desk = two_windows("el-moved").await;
     let button = desk.element("Safe").await;
     // The window that listed it is still focused; the button now sits in the other one.
-    desk.mock.change("/panel", |panel| {
-        panel.children.retain(|child| child != "/button");
-    });
-    desk.mock.change("/panel2", |panel| {
-        panel.children.push("/button".to_owned());
-    });
+    desk.move_element("/button", Moved::ToTheOtherWindow);
     refused(&mut desk, &button, WINDOW, "element_stale").await;
     // The other window's elements are refused while it isn't focused.
     let listing = desk
@@ -397,6 +383,8 @@ enum Change {
     /// Keyboard focus leaves the element's window.
     FocusMoved,
     ScreenLocked,
+    /// The user sets the stop flag.
+    Stopped,
     /// Another server's input may be stuck.
     InputDirty,
     /// The lease file is replaced, so another server could lock the new one.
@@ -422,6 +410,10 @@ impl Desk {
                 self.noctalia.set(LOCKED);
                 "screen_locked"
             }
+            Change::Stopped => {
+                std::fs::write(self.fixture.runtime_dir().join("stop"), "").unwrap();
+                "stopped"
+            }
             Change::InputDirty => {
                 std::fs::write(self.fixture.runtime_dir().join("input-dirty"), "").unwrap();
                 "recovery_required"
@@ -440,37 +432,71 @@ impl Desk {
     }
 }
 
-const CHANGES: [Change; 5] = [
+const CHANGES: [Change; 6] = [
     Change::FocusMoved,
     Change::ScreenLocked,
+    Change::Stopped,
     Change::InputDirty,
     Change::LeaseReplaced,
     Change::BecamePassword,
 ];
 
-/// An element action held on a read of the element, before its last gate.
+/// An element action of `tool` on the element named and at `element`, whose `read` of the
+/// element the test holds, and whose call that acts is `acts`.
 struct Held {
     tool: &'static str,
-    /// The element's name and path.
     element: (&'static str, &'static str),
-    /// The read that is held.
     read: &'static str,
-    /// The call that acts.
     acts: &'static str,
 }
 
-/// Holds `held`'s read, makes `change` meanwhile, and checks that the call is refused and
-/// the call that acts never reaches the app.
+/// `activate_element` on the button.
+const ACTIVATE: Held = Held {
+    tool: "activate_element",
+    element: ("Safe", "/button"),
+    read: "GetActions",
+    acts: "DoAction",
+};
+
+/// `set_element_text` on the text field.
+const SET_TEXT: Held = Held {
+    tool: "set_element_text",
+    element: ("Field", "/entry"),
+    read: "GetInterfaces",
+    acts: "SetTextContents",
+};
+
+impl Held {
+    /// The same action, holding `read` instead.
+    const fn reading(&self, read: &'static str) -> Self {
+        Self {
+            tool: self.tool,
+            element: self.element,
+            read,
+            acts: self.acts,
+        }
+    }
+
+    fn arguments(&self, element: &str) -> Value {
+        let mut arguments = json!({"element": element, "expect": {"window_id": WINDOW}});
+        if self.tool == "set_element_text" {
+            arguments["text"] = json!("abc");
+        }
+        arguments
+    }
+}
+
+/// Holds `held`'s first read of its element, makes `change` meanwhile, and checks that the
+/// call is refused and the call that acts never reaches the app.
 async fn refused_at_the_last_gate(held: &Held, change: Change) {
     let (name, path) = held.element;
     let mut desk = Desk::start(&format!("el-gate-{}-{}", held.read, change as u8)).await;
     let element = desk.element(name).await;
-    let mut arguments = json!({"element": element, "expect": {"window_id": WINDOW}});
-    if held.tool == "set_element_text" {
-        arguments["text"] = json!("abc");
-    }
-    let reading = desk.mock.hold(held.read);
-    let id = desk.server.start_call(held.tool, arguments).await;
+    let reading = desk.mock.hold_on(held.read, path);
+    let id = desk
+        .server
+        .start_call(held.tool, held.arguments(&element))
+        .await;
     reading.arrived().await;
     let expected = desk.make(change, path).await;
     reading.release();
@@ -481,27 +507,145 @@ async fn refused_at_the_last_gate(held: &Held, change: Change) {
 
 #[tokio::test]
 async fn an_activation_is_refused_when_anything_changed_while_the_element_was_read() {
-    let held = Held {
-        tool: "activate_element",
-        element: ("Safe", "/button"),
-        read: "GetActions",
-        acts: "DoAction",
-    };
     for change in CHANGES {
-        refused_at_the_last_gate(&held, change).await;
+        refused_at_the_last_gate(&ACTIVATE, change).await;
     }
 }
 
 #[tokio::test]
 async fn setting_text_is_refused_when_anything_changed_while_the_element_was_read() {
-    let held = Held {
-        tool: "set_element_text",
-        element: ("Field", "/entry"),
-        read: "GetInterfaces",
-        acts: "SetTextContents",
-    };
     for change in CHANGES {
-        refused_at_the_last_gate(&held, change).await;
+        refused_at_the_last_gate(&SET_TEXT, change).await;
+    }
+}
+
+// The role is the app's last answer before the call that acts: holding it back can't make
+// the checks of focus, the lock screen and the desk that follow it stale.
+#[tokio::test]
+async fn an_activation_is_refused_when_anything_changed_while_the_app_held_its_last_answer() {
+    for change in CHANGES {
+        refused_at_the_last_gate(&ACTIVATE.reading("GetRole"), change).await;
+    }
+}
+
+#[tokio::test]
+async fn setting_text_is_refused_when_anything_changed_while_the_app_held_its_last_answer() {
+    for change in CHANGES {
+        refused_at_the_last_gate(&SET_TEXT.reading("GetRole"), change).await;
+    }
+}
+
+// The role is read after the states, not beside them, so a field that becomes a password
+// field while its states are read is refused.
+#[tokio::test]
+async fn a_field_that_becomes_a_password_field_while_its_states_are_read_is_refused() {
+    for held in [&ACTIVATE, &SET_TEXT] {
+        refused_at_the_last_gate(&held.reading("GetState"), Change::BecamePassword).await;
+    }
+}
+
+/// How an element moves in its app's tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Moved {
+    /// To the end of its parent's children, as when a list inserts a row before it.
+    InItsParent,
+    /// Into the app's other window, which isn't focused.
+    ToTheOtherWindow,
+}
+
+/// A desk whose mock application has a second window, 3, holding an empty panel.
+async fn two_windows(name: &str) -> Desk {
+    let mut objects = objects();
+    objects.extend([
+        ("/frame2", Object::frame("Other", (640, 480), &["/panel2"])),
+        ("/panel2", Object::panel(&[])),
+    ]);
+    let mut other = app_window(3, false);
+    other["title"] = json!("Other");
+    other["layout"]["window_size"] = json!([640, 480]);
+    let windows = [app_window(WINDOW, true), other];
+    Desk::start_with(name, &["/frame", "/frame2"], objects, &windows).await
+}
+
+impl Desk {
+    fn move_element(&self, path: &str, moved: Moved) {
+        self.mock.change("/panel", |panel| {
+            panel.children.retain(|child| child != path);
+            if moved == Moved::InItsParent {
+                panel.children.push(path.to_owned());
+            }
+        });
+        if moved == Moved::ToTheOtherWindow {
+            self.mock.change("/panel2", |panel| {
+                panel.children.push(path.to_owned());
+            });
+        }
+    }
+}
+
+// The last gate finds the element again in its window's tree, so one that moved after the
+// first look is refused.
+#[tokio::test]
+async fn an_element_moved_after_it_was_first_found_is_stale() {
+    for held in [&ACTIVATE, &SET_TEXT] {
+        for moved in [Moved::InItsParent, Moved::ToTheOtherWindow] {
+            let (name, path) = held.element;
+            let mut desk = two_windows(&format!("el-move-{}-{}", held.read, moved as u8)).await;
+            let element = desk.element(name).await;
+            let reading = desk.mock.hold_on(held.read, path);
+            let id = desk
+                .server
+                .start_call(held.tool, held.arguments(&element))
+                .await;
+            reading.arrived().await;
+            desk.move_element(path, moved);
+            reading.release();
+            let result = desk.server.response(id).await["result"].clone();
+            assert_eq!(
+                tool_error(&result).0,
+                "element_stale",
+                "{moved:?}: {result}"
+            );
+            assert_eq!(desk.mock.calls(held.acts), 0, "{moved:?}");
+        }
+    }
+}
+
+// The index sent is read at the last gate, and must still name the action listed.
+#[tokio::test]
+async fn an_action_list_changed_before_the_last_gate_never_sends_another_action() {
+    for (actions, sent) in [
+        (["delete", "click"], vec![]),
+        (["click", "delete"], vec![0]),
+    ] {
+        let mut desk = Desk::start("el-action-list").await;
+        let button = desk.element("Safe").await;
+        let first = desk.mock.hold_on("GetActions", "/button");
+        let id = desk
+            .server
+            .start_call("activate_element", ACTIVATE.arguments(&button))
+            .await;
+        first.arrived().await;
+        // The last gate's first read: the frame's child on the way down to the element.
+        let last = desk.mock.hold_on("GetChildAtIndex", "/frame");
+        first.release();
+        last.arrived().await;
+        desk.mock.change("/button", |object| {
+            object.actions = actions.map(str::to_owned).to_vec();
+        });
+        last.release();
+        let result = desk.server.response(id).await["result"].clone();
+        assert_eq!(desk.mock.done(), sent, "{result}");
+        if sent.is_empty() {
+            assert_eq!(tool_error(&result).0, "element_stale", "{result}");
+        } else {
+            let outcome = &result["structuredContent"];
+            assert_eq!(outcome["accepted"], true, "{result}");
+            assert_eq!(
+                outcome["element"]["action"],
+                json!({"kind": "click", "index": 0})
+            );
+        }
     }
 }
 

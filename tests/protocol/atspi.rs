@@ -122,8 +122,11 @@ struct State {
     objects: BTreeMap<String, Object>,
     /// The application's unique name on the bus.
     app: String,
-    next: BTreeMap<&'static str, Next>,
+    /// By method, and the object's path when only that object's call is meant.
+    next: BTreeMap<(&'static str, Option<String>), Next>,
     calls: BTreeMap<&'static str, usize>,
+    /// The index each `DoAction` asked for, in the order they arrived.
+    done: Vec<i32>,
 }
 
 /// The mock application, which the test changes.
@@ -153,20 +156,35 @@ impl Held {
 impl Mock {
     /// Holds the next call of `member` until the returned handle releases it.
     pub(crate) fn hold(&self, member: &'static str) -> Held {
+        self.hold_at(member, None)
+    }
+
+    /// Holds the next call of `member` on the object at `path` until the returned handle
+    /// releases it.
+    pub(crate) fn hold_on(&self, member: &'static str, path: &str) -> Held {
+        self.hold_at(member, Some(path.to_owned()))
+    }
+
+    fn hold_at(&self, member: &'static str, path: Option<String>) -> Held {
         let arrived = Arc::new(Notify::new());
         let (release, released) = oneshot::channel();
-        self.set_next(member, Next::Hold(Arc::clone(&arrived), released));
+        self.set_next((member, path), Next::Hold(Arc::clone(&arrived), released));
         Held { arrived, release }
     }
 
     /// Answers the next call of `member` after `delay`.
     pub(crate) fn delay(&self, member: &'static str, delay: Duration) {
-        self.set_next(member, Next::Delay(delay));
+        self.set_next((member, None), Next::Delay(delay));
     }
 
     /// Fails the next call of `member` with `message`.
     pub(crate) fn fail(&self, member: &'static str, message: &str) {
-        self.set_next(member, Next::Fail(message.to_owned()));
+        self.set_next((member, None), Next::Fail(message.to_owned()));
+    }
+
+    /// The index each `DoAction` asked for, in order.
+    pub(crate) fn done(&self) -> Vec<i32> {
+        self.0.lock().unwrap().done.clone()
     }
 
     /// How many calls of `member` arrived.
@@ -190,17 +208,25 @@ impl Mock {
         self.0.lock().unwrap().objects[path].clone()
     }
 
-    fn set_next(&self, member: &'static str, next: Next) {
-        self.0.lock().unwrap().next.insert(member, next);
+    fn set_next(&self, at: (&'static str, Option<String>), next: Next) {
+        self.0.lock().unwrap().next.insert(at, next);
     }
 
-    /// Counts a call of `member` and applies what the test set for it.
-    async fn called(&self, member: &'static str) -> fdo::Result<()> {
-        let next = {
-            let mut state = self.0.lock().unwrap();
-            *state.calls.entry(member).or_default() += 1;
-            state.next.remove(member)
-        };
+    /// Counts a call of `member` on the object at `path` and takes what the test set for
+    /// it: for that object first, else for any.
+    fn count(&self, member: &'static str, path: &str) -> Option<Next> {
+        let mut state = self.0.lock().unwrap();
+        *state.calls.entry(member).or_default() += 1;
+        let next = state.next.remove(&(member, Some(path.to_owned())));
+        let next = next.or_else(|| state.next.remove(&(member, None)));
+        drop(state);
+        next
+    }
+
+    /// Counts a call of `member` on the object at `path` and applies what the test set for
+    /// it: for that object first, else for any.
+    async fn called(&self, member: &'static str, path: &str) -> fdo::Result<()> {
+        let next = self.count(member, path);
         match next {
             None => {}
             Some(Next::Hold(arrived, released)) => {
@@ -369,6 +395,10 @@ impl Node {
     fn read<T>(&self, read: impl FnOnce(&Object, &str) -> T) -> fdo::Result<T> {
         self.mock.read(&self.path, read)
     }
+
+    async fn called(&self, member: &'static str) -> fdo::Result<()> {
+        self.mock.called(member, &self.path).await
+    }
 }
 
 fn reference(app: &str, path: &str) -> (String, OwnedObjectPath) {
@@ -380,17 +410,17 @@ struct Accessible(Node);
 #[interface(name = "org.a11y.atspi.Accessible")]
 impl Accessible {
     async fn get_role(&self) -> fdo::Result<u32> {
-        self.0.mock.called("GetRole").await?;
+        self.0.called("GetRole").await?;
         self.0.read(|object, _| object.role)
     }
 
     async fn get_state(&self) -> fdo::Result<Vec<u32>> {
-        self.0.mock.called("GetState").await?;
+        self.0.called("GetState").await?;
         self.0.read(|object, _| vec![object.states, 0])
     }
 
     async fn get_children(&self) -> fdo::Result<Vec<(String, OwnedObjectPath)>> {
-        self.0.mock.called("GetChildren").await?;
+        self.0.called("GetChildren").await?;
         self.0.read(|object, app| {
             object
                 .children
@@ -401,7 +431,7 @@ impl Accessible {
     }
 
     async fn get_child_at_index(&self, index: i32) -> fdo::Result<(String, OwnedObjectPath)> {
-        self.0.mock.called("GetChildAtIndex").await?;
+        self.0.called("GetChildAtIndex").await?;
         self.0.read(|object, app| {
             let child = usize::try_from(index)
                 .ok()
@@ -414,7 +444,7 @@ impl Accessible {
     }
 
     async fn get_interfaces(&self) -> fdo::Result<Vec<String>> {
-        self.0.mock.called("GetInterfaces").await?;
+        self.0.called("GetInterfaces").await?;
         self.0.read(|object, _| object.interfaces())
     }
 
@@ -429,7 +459,7 @@ struct Component(Node);
 #[interface(name = "org.a11y.atspi.Component")]
 impl Component {
     async fn get_extents(&self, coord_type: u32) -> fdo::Result<(i32, i32, i32, i32)> {
-        self.0.mock.called("GetExtents").await?;
+        self.0.called("GetExtents").await?;
         if coord_type != WINDOW_COORDS {
             return Err(fdo::Error::InvalidArgs(
                 "only WINDOW coordinates".to_owned(),
@@ -444,7 +474,7 @@ struct Action(Node);
 #[interface(name = "org.a11y.atspi.Action")]
 impl Action {
     async fn get_actions(&self) -> fdo::Result<Vec<(String, String, String)>> {
-        self.0.mock.called("GetActions").await?;
+        self.0.called("GetActions").await?;
         self.0.read(|object, _| {
             object
                 .actions
@@ -455,7 +485,8 @@ impl Action {
     }
 
     async fn do_action(&self, index: i32) -> fdo::Result<bool> {
-        self.0.mock.called("DoAction").await?;
+        self.0.mock.0.lock().unwrap().done.push(index);
+        self.0.called("DoAction").await?;
         self.0.read(|object, _| {
             usize::try_from(index).is_ok_and(|index| index < object.actions.len())
         })
@@ -468,7 +499,7 @@ struct Text(Node);
 impl Text {
     #[zbus(property)]
     async fn character_count(&self) -> fdo::Result<i32> {
-        self.0.mock.called("CharacterCount").await?;
+        self.0.called("CharacterCount").await?;
         self.0.read(|object, _| object.text.unwrap_or_default())
     }
 }
@@ -478,7 +509,7 @@ struct EditableText(Node);
 #[interface(name = "org.a11y.atspi.EditableText")]
 impl EditableText {
     async fn set_text_contents(&self, text: String) -> fdo::Result<bool> {
-        self.0.mock.called("SetTextContents").await?;
+        self.0.called("SetTextContents").await?;
         let characters = i32::try_from(text.chars().count()).unwrap();
         self.0
             .mock
