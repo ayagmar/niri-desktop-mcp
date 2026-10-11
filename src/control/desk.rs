@@ -1145,6 +1145,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_checkpoint_refuses_what_would_refuse_an_action_now() {
+        let me = session(1);
+        let dir = crate::test_support::fresh_dir("desk-checkpoint");
+        let desk = Desk::start(&env(&dir));
+        let runtime = RuntimeDir::of(&env(&dir)).unwrap();
+        let checked = |session: &Session| desk.checkpoint(session).map_err(|error| error.name);
+        desk.acquire(&me, "me/1", ready(None), ready(None))
+            .await
+            .unwrap();
+        assert_eq!(checked(&me), Ok(()));
+        assert_eq!(checked(&session(2)), Err(ErrorName::LeaseRequired));
+        let marker = runtime.path().join("input-dirty");
+        std::fs::write(&marker, "").unwrap();
+        assert_eq!(checked(&me), Err(ErrorName::RecoveryRequired));
+        std::fs::remove_file(&marker).unwrap();
+        // Read from the file, before the stop watcher has seen it.
+        runtime.stop().unwrap();
+        assert_eq!(checked(&me), Err(ErrorName::Stopped));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_checkpoint_refuses_a_replaced_lease_file() {
+        let me = session(1);
+        let dir = crate::test_support::fresh_dir("desk-checkpoint-lease");
+        let desk = Desk::start(&env(&dir));
+        desk.acquire(&me, "me/1", ready(None), ready(None))
+            .await
+            .unwrap();
+        let lease = RuntimeDir::of(&env(&dir)).unwrap().path().join("lease");
+        std::fs::remove_file(&lease).unwrap();
+        std::fs::write(&lease, "").unwrap();
+        let moved = desk.checkpoint(&me).unwrap_err();
+        assert_eq!(moved.name, ErrorName::LeaseRequired);
+        assert!(moved.detail.contains("removed or replaced"), "{moved:?}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn losing_the_stop_watcher_mid_action_says_to_restart() {
         let me = session(1);
         let dir = crate::test_support::fresh_dir("desk-act-gone");
