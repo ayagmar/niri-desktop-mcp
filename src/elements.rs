@@ -8,7 +8,9 @@ pub(crate) mod actions;
 use niri_ipc::Window;
 use serde::Serialize;
 
-use crate::a11y::model::{self, Extents, Filter, Fresh, LayoutBox, Placement, Refused, Unmappable};
+use crate::a11y::model::{
+    self, Extents, Filter, Fresh, LayoutBox, Link, NameHash, Placement, Refused, Unmappable,
+};
 use crate::a11y::{self, A11y, Capped, ElementRef, Failed, Node, Want};
 use crate::coords::LayoutPt;
 use crate::error::{CallError, ErrorName, ToolError};
@@ -186,7 +188,7 @@ pub(crate) async fn aim(
         return Err(refused);
     }
     let request = a11y.request(a11y::BUDGET).await?;
-    identify(&request, element, window).await?;
+    identify(&request, element, window, Names::Parents).await?;
     let probe = match request.probe(element).await {
         Ok(probe) => probe,
         Err(Failed::Gone(detail)) => return Err(stale(&detail)),
@@ -208,16 +210,29 @@ pub(crate) async fn aim(
     }
 }
 
+/// Which names `identify` compares with the ones `elements` listed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Names {
+    /// The parents' from the frame down, not the element's own: a pointer aim, since a
+    /// click doesn't read the element again afterwards and a counter relabels itself on
+    /// every click.
+    Parents,
+    /// The element's own too: the element actions, which read it again after acting.
+    All,
+}
+
 /// Checks that `element` is still the object `elements` listed, not another that took its
 /// path: its application still has niri's `window`, whose accessible frame, found again,
-/// is the ref's; and each object from that frame down to the element is still at the
-/// index it had among its parent's children, as the parent says. Otherwise
-/// `element_stale`. Its role is checked by the caller. Its name isn't: buttons relabel
-/// themselves when used, as counters and play buttons do.
+/// is the ref's; each object from that frame down to the element is still at the index
+/// it had among its parent's children, as the parent says; and each has the name it was
+/// listed with, the element's own as `names` says. A list that reuses a row for another
+/// record keeps its place and path but not its name. Otherwise `element_stale`. Its role
+/// is checked by the caller.
 pub(crate) async fn identify(
     request: &a11y::Request,
     element: &ElementRef,
     window: &Window,
+    names: Names,
 ) -> Result<(), ToolError> {
     let app = request.app(element.kept.pid).await.map_err(|error| {
         if error.name == ErrorName::NotAccessible {
@@ -241,19 +256,57 @@ pub(crate) async fn identify(
         )));
     }
     let mut parent = element.frame.as_str();
-    for (path, index) in &element.kept.lineage {
-        let (bus, child) = request
-            .child_at(&element.bus, parent, *index)
-            .await
-            .map_err(gone_is_stale)?;
-        if bus != element.bus || child != *path {
-            return Err(stale(
-                "the element moved in its window, or another element took its place",
-            ));
+    let last = element.kept.lineage.len().saturating_sub(1);
+    for (at, link) in element.kept.lineage.iter().enumerate() {
+        vouched(request, element, parent, link).await?;
+        let own = at == last;
+        if !own || names == Names::All {
+            same_name(request, element, link, own).await?;
         }
-        parent = path;
+        parent = &link.path;
     }
     Ok(())
+}
+
+/// Checks that `parent` still has the object of `link` at its index among its children.
+async fn vouched(
+    request: &a11y::Request,
+    element: &ElementRef,
+    parent: &str,
+    link: &Link,
+) -> Result<(), ToolError> {
+    let (bus, child) = request
+        .child_at(&element.bus, parent, link.index)
+        .await
+        .map_err(gone_is_stale)?;
+    if bus != element.bus || child != link.path {
+        return Err(stale(
+            "the element moved in its window, or another element took its place",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks that the object of `link`, the element itself when `own`, still has the name it
+/// was listed with.
+async fn same_name(
+    request: &a11y::Request,
+    element: &ElementRef,
+    link: &Link,
+    own: bool,
+) -> Result<(), ToolError> {
+    let name = request
+        .name((&element.bus, &link.path))
+        .await
+        .map_err(gone_is_stale)?;
+    if NameHash::of(&name) == link.name {
+        return Ok(());
+    }
+    Err(stale(if own {
+        "the element's name changed since `elements` listed it"
+    } else {
+        "a parent of the element changed its name since `elements` listed it"
+    }))
 }
 
 /// A call on a gone object is `element_stale`; other failures stay as they are.

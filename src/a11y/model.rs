@@ -7,6 +7,8 @@
 //! `window_size`. GTK 3 measures from its surface's shadow and Qt from inside its own
 //! decorations, and both fail the guard with client-side decorations.
 
+use std::hash::{DefaultHasher, Hash, Hasher};
+
 use niri_ipc::{LogicalOutput, WindowLayout};
 use serde::Serialize;
 
@@ -451,9 +453,30 @@ pub(crate) struct Kept {
     pub(crate) actions: Vec<String>,
     /// Where it was in its window's tree, to tell it apart from another object that took
     /// its path, as a virtualized list reuses its rows: each object from the frame's child
-    /// down to the element, with its path and its index among its parent's children.
-    /// Never logged or returned.
-    pub(crate) lineage: Vec<(String, i32)>,
+    /// down to the element, the element last. Never logged or returned.
+    pub(crate) lineage: Vec<Link>,
+}
+
+/// One object on the way from a window's frame down to an element: its path, its index
+/// among its parent's children, and its accessible name's hash.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Link {
+    pub(crate) path: String,
+    pub(crate) index: i32,
+    pub(crate) name: NameHash,
+}
+
+/// A hash of an accessible name, to tell whether the name changed without keeping it.
+/// Kept in memory only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct NameHash(u64);
+
+impl NameHash {
+    pub(crate) fn of(name: &str) -> Self {
+        let mut hasher = DefaultHasher::new();
+        name.hash(&mut hasher);
+        Self(hasher.finish())
+    }
 }
 
 /// The element and its window as they are now.

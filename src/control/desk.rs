@@ -19,6 +19,7 @@ use super::stop;
 use super::{marker, procs};
 use crate::Env;
 use crate::a11y::ElementRef;
+use crate::a11y::model::NameHash;
 use crate::error::{CallError, ErrorName, ToolError};
 use crate::refs::{Refs, Shot};
 use crate::session::{Session, SessionId};
@@ -421,6 +422,14 @@ impl Desk {
     pub(crate) fn element(&self, session: &Session, id: &str) -> Result<ElementRef, ToolError> {
         self.owned_refs(session)
             .map_or_else(|| Refs::default().element(id), |refs| refs.element(id))
+    }
+
+    /// Keeps `name` as the name of the element the ref `id` names, if the lease `session`
+    /// holds kept that ref.
+    pub(crate) fn rename_element(&self, session: &Session, id: &str, name: NameHash) {
+        if let Some(mut refs) = self.owned_refs(session) {
+            refs.rename_element(id, name);
+        }
     }
 
     /// The runtime directory, where input writes its marker.

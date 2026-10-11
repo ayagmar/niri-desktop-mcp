@@ -44,6 +44,8 @@ pub(crate) struct Object {
     pub(crate) actions: Vec<String>,
     /// With `Text` and `EditableText` interfaces: how many characters it holds.
     pub(crate) text: Option<i32>,
+    /// A counter button's count, which each `DoAction` adds one to and names it after.
+    pub(crate) counter: Option<u32>,
 }
 
 impl Object {
@@ -487,6 +489,12 @@ impl Action {
     async fn do_action(&self, index: i32) -> fdo::Result<bool> {
         self.0.mock.0.lock().unwrap().done.push(index);
         self.0.called("DoAction").await?;
+        self.0.mock.change(&self.0.path, |object| {
+            if let Some(count) = object.counter.as_mut() {
+                *count += 1;
+                object.name = format!("Count: {count}");
+            }
+        });
         self.0.read(|object, _| {
             usize::try_from(index).is_ok_and(|index| index < object.actions.len())
         })

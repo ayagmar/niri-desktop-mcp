@@ -13,7 +13,7 @@ use std::time::Duration;
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::a11y::model::{self, State, States};
+use crate::a11y::model::{self, NameHash, State, States};
 use crate::a11y::{self, A11y, Dispatched, ElementRef, Failed, Request};
 use crate::act::{Observed, Outcome};
 use crate::error::{CallError, ErrorName, ToolError};
@@ -24,7 +24,7 @@ use crate::niri::waiter::{View, Waited, Waiter};
 use crate::policy::{self, Loaded};
 use niri_ipc::Window;
 
-use super::{gone_is_stale, identify, stale};
+use super::{Names, gone_is_stale, identify, stale};
 
 /// How long an activation's effect has to show before the element is looked at again.
 /// GTK 3 and GTK 4 buttons answer the action as they answer Enter: shown pressed for
@@ -92,6 +92,15 @@ pub(crate) struct Acted {
     /// `set_element_text`: the characters the element says it holds now.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) characters: Option<i32>,
+}
+
+/// An element action's outcome, and the hash of the element's name right after it, for
+/// its ref to keep: the action may have relabelled the element, as a counter does.
+#[derive(Debug)]
+pub(crate) struct Done {
+    pub(crate) outcome: Outcome,
+    /// None when the name couldn't be read.
+    pub(crate) name: Option<NameHash>,
 }
 
 /// The index of the action `activate_element` takes among the element's `advertised`
@@ -203,7 +212,7 @@ impl<R: Recheck> Gate<'_, R> {
         waiter: &mut Waiter,
         read: impl Future<Output = Result<T, CallError>>,
     ) -> Result<Checked<T>, CallError> {
-        identify(request, element, owner(waiter.view(), element)?).await?;
+        identify(request, element, owner(waiter.view(), element)?, Names::All).await?;
         let read = read.await?;
         let (role, states) = current(request, element).await?;
         self.recheck.control().await?;
@@ -232,7 +241,7 @@ pub(crate) async fn activate(
     element: &ElementRef,
     requested: Option<&str>,
     gate: Gate<'_, impl Recheck>,
-) -> Result<Outcome, CallError> {
+) -> Result<Done, CallError> {
     let a11y = accessible(input)?;
     let index =
         choose_action(&element.kept.actions, requested).map_err(CallError::InvalidArguments)?;
@@ -248,7 +257,13 @@ pub(crate) async fn activate(
     owner_focused(gate.policy, waiter.view(), element, &gate.expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
     // The fast refusals, before the last gate asks all of it again.
-    identify(&request, element, owner(waiter.view(), element)?).await?;
+    identify(
+        &request,
+        element,
+        owner(waiter.view(), element)?,
+        Names::All,
+    )
+    .await?;
     offered(&request, element, action).await?;
     let checked = gate
         .last(
@@ -273,6 +288,10 @@ pub(crate) async fn activate(
         Waited::Done(()) => After::WindowGone,
         Waited::Timeout | Waited::Lost(_) => After::Probed(request.state(element).await),
     };
+    let name = match after {
+        After::Probed(Ok(_)) => own_name(&request, element).await,
+        After::WindowGone | After::Probed(Err(_)) => None,
+    };
     let (observed, changes, detail) = activation(checked.states, after);
     let (states_set, states_cleared) = changes.unwrap_or_default();
     let acted = Acted {
@@ -282,13 +301,16 @@ pub(crate) async fn activate(
         states_cleared,
         characters: None,
     };
-    Ok(done(
-        (observed, detail),
-        lost,
-        waiter.view(),
-        checked.focus,
-        acted,
-    ))
+    Ok(Done {
+        outcome: done(
+            (observed, detail),
+            lost,
+            waiter.view(),
+            checked.focus,
+            acted,
+        ),
+        name,
+    })
 }
 
 /// The index to ask the app for `action`: it must still be the element's action of that
@@ -319,14 +341,20 @@ pub(crate) async fn set_text(
     element: &ElementRef,
     text: &str,
     gate: Gate<'_, impl Recheck>,
-) -> Result<Outcome, CallError> {
+) -> Result<Done, CallError> {
     check_text(text)?;
     let a11y = accessible(input)?;
     let mut waiter = niri::waiter(input.niri.events).await?;
     owner_focused(gate.policy, waiter.view(), element, &gate.expect)?;
     let request = a11y.request(a11y::BUDGET).await?.names_only();
     // The fast refusals, before the last gate asks all of it again.
-    identify(&request, element, owner(waiter.view(), element)?).await?;
+    identify(
+        &request,
+        element,
+        owner(waiter.view(), element)?,
+        Names::All,
+    )
+    .await?;
     editable(&request, element).await?;
     let checked = gate
         .last(element, &request, &mut waiter, editable(&request, element))
@@ -342,6 +370,7 @@ pub(crate) async fn set_text(
         .map_err(gone_is_stale)?;
     let lost = taken(dispatched, "the new text")?;
     let count = request.character_count(element).await;
+    let name = own_name(&request, element).await;
     let (observed, characters, detail) = written(text.chars().count(), count);
     let acted = Acted {
         role: model::role_name(checked.role),
@@ -350,13 +379,22 @@ pub(crate) async fn set_text(
         states_cleared: Vec::new(),
         characters,
     };
-    Ok(done(
-        (observed, detail),
-        lost,
-        waiter.view(),
-        checked.focus,
-        acted,
-    ))
+    Ok(Done {
+        outcome: done(
+            (observed, detail),
+            lost,
+            waiter.view(),
+            checked.focus,
+            acted,
+        ),
+        name,
+    })
+}
+
+/// The hash of the element's name now, if it can be read.
+async fn own_name(request: &Request, element: &ElementRef) -> Option<NameHash> {
+    let name = request.name(element.at()).await.ok()?;
+    Some(NameHash::of(&name))
 }
 
 /// Checks the element has an `EditableText` interface, or its text can't be set.

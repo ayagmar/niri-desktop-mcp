@@ -8,7 +8,7 @@ use std::future::Future;
 
 use serde::Serialize;
 
-use super::model::{Extents, States};
+use super::model::{Extents, Link, NameHash, States};
 use crate::error::{ErrorName, ToolError};
 
 /// One accessible object, as the walk read it.
@@ -65,9 +65,9 @@ pub(crate) struct Walked {
 }
 
 impl Walked {
-    /// The path and index in its parent of each node from the root's child down to the
-    /// node at `at`.
-    pub(crate) fn lineage(&self, at: usize) -> Vec<(String, i32)> {
+    /// Each node from the root's child down to the node at `at`, with its index in its
+    /// parent and its name's hash.
+    pub(crate) fn lineage(&self, at: usize) -> Vec<Link> {
         let mut chain = Vec::new();
         let mut next = Some(at);
         while let Some(this) = next {
@@ -75,7 +75,11 @@ impl Walked {
             else {
                 break;
             };
-            chain.push((node.path.clone(), *index));
+            chain.push(Link {
+                path: node.path.clone(),
+                index: *index,
+                name: NameHash::of(&node.name),
+            });
             next = *parent;
         }
         chain.reverse();
@@ -154,9 +158,10 @@ mod tests {
 
     const SHOWING: u32 = (1 << 25) | (1 << 30);
 
-    /// An in-memory tree: path → (showing, children). Missing paths are gone. `/late`
-    /// times out with the request's budget spent, `/hung` times out on its own call with
-    /// budget left, as a hung app does, and `/lost` fails as a lost bus connection does.
+    /// An in-memory tree: path → (showing, children), each node named after its path.
+    /// Missing paths are gone. `/late` times out with the request's budget spent, `/hung`
+    /// times out on its own call with budget left, as a hung app does, and `/lost` fails
+    /// as a lost bus connection does.
     struct Tree {
         nodes: BTreeMap<&'static str, (bool, Vec<&'static str>)>,
         spent: AtomicBool,
@@ -188,7 +193,7 @@ mod tests {
             std::future::ready(Ok(self.nodes.get(path).map(|(showing, children)| Node {
                 path: path.to_owned(),
                 role: 43,
-                name: String::new(),
+                name: format!("name of {path}"),
                 states: States::from_words(&[if *showing { SHOWING } else { 0 }]),
                 extents: None,
                 actions: Vec::new(),
@@ -274,7 +279,11 @@ mod tests {
             .await
             .unwrap();
         let at = |path: &str| walked.nodes.iter().position(|node| node.path == path);
-        let place = |path: &str, index| (path.to_owned(), index);
+        let place = |path: &str, index| Link {
+            path: path.to_owned(),
+            index,
+            name: NameHash::of(&format!("name of {path}")),
+        };
         assert_eq!(
             walked.lineage(at("/a/2/x").unwrap()),
             [place("/a", 1), place("/a/2", 1), place("/a/2/x", 0)]

@@ -15,6 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 use tokio::time::Instant;
 
+use crate::a11y::model::NameHash;
 use crate::a11y::{self, A11y, Presence};
 use crate::act::{self, Outcome};
 use crate::audit::Audit;
@@ -231,6 +232,12 @@ impl Engine {
         id: &str,
     ) -> Result<a11y::ElementRef, ToolError> {
         self.desk.element(session, id)
+    }
+
+    /// Keeps `name` as the name of the element ref `id` of the lease `session` holds, as
+    /// an element action read it after acting.
+    pub(crate) fn rename_element(&self, session: &Session, id: &str, name: NameHash) {
+        self.desk.rename_element(session, id, name);
     }
 
     /// The readiness report, as `status` returns it to `session`.

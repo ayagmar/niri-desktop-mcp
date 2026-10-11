@@ -486,7 +486,7 @@ impl Request {
     }
 
     /// The accessible name of the object at `at`.
-    async fn name(&self, at: (&str, &str)) -> Result<String, Failed> {
+    pub(crate) async fn name(&self, at: (&str, &str)) -> Result<String, Failed> {
         let value: OwnedValue = self
             .call(
                 at,
@@ -645,7 +645,7 @@ pub(crate) struct ElementRef {
 
 impl ElementRef {
     /// Where the element is on the bus.
-    fn at(&self) -> (&str, &str) {
+    pub(crate) fn at(&self) -> (&str, &str) {
         (&self.bus, &self.path)
     }
 }

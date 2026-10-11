@@ -131,7 +131,7 @@ An agent should stop and tell you when it gets one of these. Calling the action 
 
 ### `element_stale`
 
-**Cause:** an element ref's window, app or element is gone, the element is now something else, has another name, or sits elsewhere in its window's tree (an app may reuse an object for another record, as a long list does with its rows), or the ref isn't from this lease.
+**Cause:** an element ref's window, app or element is gone; the element is now another kind of element or sits elsewhere in its window's tree; the element, or an element it sits in, such as its list row, has another name than when `elements` listed it (an app may reuse an object for another record, as a long list does with its rows); or the ref isn't from this lease. `activate_element` and `set_element_text` compare the element's own name too, and keep the name they read after acting, so a counter that relabels itself when activated stays valid; a name that changes on its own makes the ref stale. The pointer tools compare only the names of the elements it sits in.
 
 **What to do:** call `elements` again and aim from its new list.
 

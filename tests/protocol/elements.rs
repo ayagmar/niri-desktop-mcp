@@ -104,6 +104,16 @@ impl Desk {
         }
     }
 
+    /// The `screenshot_ref` of a screenshot of the focused output.
+    async fn screenshot_ref(&mut self) -> String {
+        let shot = self
+            .server
+            .call("screenshot", json!({"target": "focused_output"}))
+            .await;
+        let id = &shot["structuredContent"]["screenshot_ref"];
+        id.as_str().unwrap_or_else(|| panic!("{shot}")).to_owned()
+    }
+
     /// The `element_ref` of the listed element named `name`.
     async fn element(&mut self, name: &str) -> String {
         let listing = self
@@ -345,17 +355,108 @@ async fn another_object_at_a_listed_elements_path_is_stale() {
         panel.children.retain(|child| child != "/button");
     });
     refused(&mut desk, &button, WINDOW, "element_stale").await;
-    // Back in place, it is the element listed again, though it relabelled itself as a
-    // counter does.
+    // Back in place, it is the element listed again.
     desk.mock.change("/panel", |panel| {
         panel.children.insert(0, "/button".to_owned());
-    });
-    desk.mock.change("/button", |object| {
-        object.name = "Safe: 1".to_owned();
     });
     let arguments = json!({"element": button, "expect": {"window_id": WINDOW}});
     let result = desk.server.call("activate_element", arguments).await;
     assert_eq!(result["structuredContent"]["accepted"], true, "{result}");
+}
+
+/// Calls `held`'s tool on `element` and checks it is refused with `element_stale` and
+/// nothing reaches the app.
+async fn stale(desk: &mut Desk, held: &Held, element: &str) {
+    let before = desk.mock.calls(held.acts);
+    let result = desk.server.call(held.tool, held.arguments(element)).await;
+    let (name, detail) = tool_error(&result);
+    assert_eq!(name, "element_stale", "{result}");
+    assert!(detail.contains("since `elements` listed it"), "{detail}");
+    assert_eq!(desk.mock.calls(held.acts), before, "{result}");
+}
+
+// A virtualized list reuses an object for another record in place: the same path, index,
+// role and actions, another name.
+#[tokio::test]
+async fn an_object_reused_in_place_for_another_record_is_stale() {
+    let mut desk = Desk::start("el-reused").await;
+    let button = desk.element("Safe").await;
+    let entry = desk.element("Field").await;
+    desk.mock.change("/button", |object| {
+        object.name = "Delete different record".to_owned();
+    });
+    desk.mock.change("/entry", |object| {
+        object.name = "Different record".to_owned();
+    });
+    stale(&mut desk, &ACTIVATE, &button).await;
+    stale(&mut desk, &SET_TEXT, &entry).await;
+}
+
+// The row a list reused holds the record's name; the button in it keeps its own.
+#[tokio::test]
+async fn a_parent_renamed_in_place_makes_its_elements_stale_for_every_tool() {
+    let mut desk = Desk::start("el-parent-renamed").await;
+    let button = desk.element("Safe").await;
+    let entry = desk.element("Field").await;
+    let shot = desk.screenshot_ref().await;
+    desk.mock.change("/panel", |object| {
+        object.name = "Another record".to_owned();
+    });
+    stale(&mut desk, &ACTIVATE, &button).await;
+    stale(&mut desk, &SET_TEXT, &entry).await;
+    let aimed = json!({"screenshot_ref": shot, "element": button});
+    let result = desk.server.call("pointer_move", aimed).await;
+    let (name, detail) = tool_error(&result);
+    assert_eq!(name, "element_stale", "{result}");
+    assert!(
+        detail.contains("a parent of the element changed its name"),
+        "{detail}"
+    );
+}
+
+// A counter's activation relabels it; the ref keeps the name read after each one. A name
+// that changes on its own makes the ref stale, but a pointer aim doesn't check the
+// element's own name, since a click doesn't read it afterwards.
+#[tokio::test]
+async fn a_counter_stays_valid_through_its_own_relabelling_and_only_through_that() {
+    let mut objects = objects();
+    objects.push((
+        "/counter",
+        Object {
+            counter: Some(0),
+            ..Object::button("Count: 0", &["click"])
+        },
+    ));
+    let windows = [
+        app_window(WINDOW, true),
+        window_on(2, Some("other"), 1, false),
+    ];
+    if let Some((_, panel)) = objects.iter_mut().find(|(path, _)| *path == "/panel") {
+        panel.children.push("/counter".to_owned());
+    }
+    let mut desk = Desk::start_with("el-counter", &["/frame"], objects, &windows).await;
+    let counter = desk.element("Count: 0").await;
+    let shot = desk.screenshot_ref().await;
+    let arguments = ACTIVATE.arguments(&counter);
+    for count in 1..=20 {
+        let result = desk
+            .server
+            .call("activate_element", arguments.clone())
+            .await;
+        assert_eq!(
+            result["structuredContent"]["accepted"], true,
+            "{count}: {result}"
+        );
+        assert_eq!(desk.mock.object("/counter").name, format!("Count: {count}"));
+    }
+    desk.mock.change("/counter", |object| {
+        object.name = "Count: 99".to_owned();
+    });
+    let aimed = json!({"screenshot_ref": shot, "element": counter});
+    let moved = desk.server.call("pointer_move", aimed).await;
+    // Past the element's checks: the mock's button can't be placed on the fake desktop.
+    assert_eq!(tool_error(&moved).0, "element_unmappable", "{moved}");
+    stale(&mut desk, &ACTIVATE, &counter).await;
 }
 
 #[tokio::test]
@@ -477,6 +578,12 @@ impl Held {
         }
     }
 
+    /// A short name for fixtures: the call that acts and the read held.
+    fn tag(&self) -> String {
+        let read = self.read.chars().skip(3).take(4);
+        self.acts.chars().take(2).chain(read).collect()
+    }
+
     fn arguments(&self, element: &str) -> Value {
         let mut arguments = json!({"element": element, "expect": {"window_id": WINDOW}});
         if self.tool == "set_element_text" {
@@ -490,7 +597,7 @@ impl Held {
 /// call is refused and the call that acts never reaches the app.
 async fn refused_at_the_last_gate(held: &Held, change: Change) {
     let (name, path) = held.element;
-    let mut desk = Desk::start(&format!("el-gate-{}-{}", held.read, change as u8)).await;
+    let mut desk = Desk::start(&format!("el-g-{}-{}", held.tag(), change as u8)).await;
     let element = desk.element(name).await;
     let reading = desk.mock.hold_on(held.read, path);
     let id = desk
@@ -590,7 +697,7 @@ async fn an_element_moved_after_it_was_first_found_is_stale() {
     for held in [&ACTIVATE, &SET_TEXT] {
         for moved in [Moved::InItsParent, Moved::ToTheOtherWindow] {
             let (name, path) = held.element;
-            let mut desk = two_windows(&format!("el-move-{}-{}", held.read, moved as u8)).await;
+            let mut desk = two_windows(&format!("el-move-{}-{}", held.tag(), moved as u8)).await;
             let element = desk.element(name).await;
             let reading = desk.mock.hold_on(held.read, path);
             let id = desk

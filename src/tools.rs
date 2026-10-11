@@ -12,7 +12,7 @@ use rmcp::{ErrorData, RoleServer, ServerHandler, schemars, tool, tool_handler, t
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::a11y::model;
+use crate::a11y::model::{self, NameHash};
 use crate::act::{self, Outcome};
 use crate::audit::{self, Call, Caller};
 use crate::coords::ImagePx;
@@ -1170,7 +1170,9 @@ impl Server {
                 policy: input.policy,
                 recheck: &self.engine.recheck(&self.session),
             };
-            actions::activate(input, &element, args.action.as_deref(), gate).await
+            let done = actions::activate(input, &element, args.action.as_deref(), gate).await?;
+            self.renamed(&args.element, done.name);
+            Ok(done.outcome)
         };
         let asked = Asked {
             tool: "activate_element",
@@ -1218,7 +1220,9 @@ impl Server {
                 policy: input.policy,
                 recheck: &self.engine.recheck(&self.session),
             };
-            actions::set_text(input, &element, &args.text, gate).await
+            let done = actions::set_text(input, &element, &args.text, gate).await?;
+            self.renamed(&args.element, done.name);
+            Ok(done.outcome)
         };
         let asked = Asked {
             tool: "set_element_text",
@@ -1566,6 +1570,13 @@ impl Server {
             work,
         )
         .await
+    }
+
+    /// Keeps the name an element action read after acting in the element ref `id`.
+    fn renamed(&self, id: &str, name: Option<NameHash>) {
+        if let Some(name) = name {
+            self.engine.rename_element(&self.session, id, name);
+        }
     }
 
     /// Runs one action through the desk's gate, with a screenshot when `shoot` asks for

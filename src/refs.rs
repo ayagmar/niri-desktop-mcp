@@ -15,6 +15,7 @@ use niri_ipc::{LogicalOutput, Output};
 use tokio::time::Instant;
 
 use crate::a11y::ElementRef;
+use crate::a11y::model::NameHash;
 use crate::coords::{self, Capture, ImagePx, LayoutPt, ProtocolPt};
 use crate::error::{ErrorName, ToolError};
 use crate::observe::{Rect, Screenshot};
@@ -289,6 +290,20 @@ impl Refs {
         }
         self.elements.push_back((self.elements_issued, element));
         Some(format!("elem-{}-{}", self.tag, self.elements_issued))
+    }
+
+    /// Keeps `name` as the name of the element the ref `id` names, as an element action
+    /// read it after acting, if the current lease kept that ref.
+    pub(crate) fn rename_element(&mut self, id: &str, name: NameHash) {
+        let wanted = self.number(id, "elem");
+        let element = self
+            .elements
+            .iter_mut()
+            .find(|(issued, _)| Some(*issued) == wanted)
+            .and_then(|(_, element)| element.kept.lineage.last_mut());
+        if let Some(own) = element {
+            own.name = name;
+        }
     }
 
     /// The element ref named `id`, if the current lease kept it.
