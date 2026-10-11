@@ -89,3 +89,19 @@ Runs at `9ff91c2`, the last code commit, each with C1's host snapshot unchanged,
 | `make nested-a11y SSD=1 SHARED=1` | 1791677003-3208484 | pass |
 
 Activations took a median of 316–329 ms per call, as before the fixes; the last gate adds a readiness report, one AT-SPI read and a few file reads. An earlier run, 1791676674-2387079, passed every M9 and M9b check but failed the host journal check: three `sudo` entries from the terminal's own cgroup, which the harness runs in and which no nested process wrote; the check fails on anything in that cgroup by design.
+
+## After the second review
+
+The second round of fixes reads the element before the last gate checks the server's own state, checks the names of the element and the elements it sits in, and reports a stop or a lost lease after the acting call went out as `uncertain`. Each finding has a protocol test against the mock application; the nested runs check that the counter buttons, which relabel themselves on every activation, keep their refs through the 20 activations per toolkit, and that the 100 pointer clicks per ref of M9 still pass with the parents' names checked.
+
+Runs at `23891c5`, the last code commit, each with C1's host snapshot unchanged, no host journal entries from the run and no leftover processes:
+
+| Command | Run | Result |
+|---|---|---|
+| `make check` | before every commit | pass: 296 server, 126 harness and 197 protocol tests, one protocol test ignored |
+| `make nested-a11y` | 1791680102-2769815 | pass |
+| `make nested-a11y SHARED=1` | 1791680163-2929674 | pass |
+| `make nested-a11y SSD=1` | 1791680211-3047320 | pass |
+| `make nested-a11y SSD=1 SHARED=1` | 1791680273-3201259 | pass |
+
+Activations took a median of 315–329 ms per call, as before; the last gate now reads the element's lineage, names, actions, states and role again, one call at a time, beside the readiness report.
